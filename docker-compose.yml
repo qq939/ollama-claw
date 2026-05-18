@@ -1,0 +1,79 @@
+name: ollama-claw
+
+networks:
+  ollama-claw-network:
+    driver: bridge
+    ipam:
+      config:
+        - subnet: 172.30.0.0/16
+
+services:
+  ollama:
+    build:
+      context: ./agents/ollama
+      dockerfile: Dockerfile
+    container_name: ollama
+    restart: unless-stopped
+    volumes:
+      - ./ollama-data:/root/.ollama
+    ports:
+      - "11434:11434"
+    networks:
+      - ollama-claw-network
+    environment:
+      - OLLAMA_HOST=0.0.0.0:11434
+
+  openclaw-gateway:
+    build:
+      context: ./agents/gateway
+      dockerfile: Dockerfile
+    container_name: openclaw-gateway
+    restart: unless-stopped
+    networks:
+      ollama-claw-network:
+        ipv4_address: 172.30.0.10
+    ports:
+      - "18789:18790"
+    volumes:
+      - ./config/openclaw:/agent-config:ro
+    environment:
+      - OPENCLAW_GATEWAY_TOKEN=${OPENCLAW_GATEWAY_TOKEN:-2ac145e2572b9b2fb44717b520c22588858403a75d4a6ea2}
+      - OPENCLAW_GATEWAY_PORT=18790
+    depends_on:
+      - ollama
+
+  control-18080:
+    build:
+      context: ./control
+    container_name: control-18080
+    restart: unless-stopped
+    ports:
+      - "18080:8080"
+    environment:
+      - HOST_CONFIG_ROOT=${PWD}/config
+      - HOST_WORKSPACES_ROOT=${PWD}/workspaces
+      - PUBLIC_PREVIEW_BASE_URL=http://localhost
+      - OPENCLAW_GATEWAY_HOST=172.30.0.10
+      - OPENCLAW_GATEWAY_PORT=18790
+      - OPENCLAW_GATEWAY_TOKEN=${OPENCLAW_GATEWAY_TOKEN:-2ac145e2572b9b2fb44717b520c22588858403a75d4a6ea2}
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock
+      - ./config:/config
+      - ./workspaces:/workspaces
+      - ./logs:/logs
+      - ./logs/hermit:/logs/hermit
+      - ./config/rules:/config/rules
+    networks:
+      - ollama-claw-network
+    depends_on:
+      - openclaw-gateway
+
+  agent-image-openclaw:
+    build:
+      context: ./agents/agent-openclaw
+      dockerfile: Dockerfile
+    image: ollama-claw-agent-openclaw:latest
+    profiles: ["templates"]
+    command: ["sleep", "infinity"]

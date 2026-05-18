@@ -1,0 +1,76 @@
+{
+  "meta": {
+    "lastTouchedVersion": "2026.2.9",
+    "lastTouchedAt": "2026-05-15T00:00:00.000Z"
+  },
+  "wizard": {
+    "lastRunAt": "2026-05-15T00:00:00.000Z",
+    "lastRunVersion": "2026.2.9",
+    "lastRunCommand": "configure",
+    "lastRunMode": "local"
+  },
+  "auth": {
+    "profiles": {}
+  },
+  "models": {
+    "providers": {
+      "ollama": {
+        "baseUrl": "http://ollama:11434/v1",
+        "apiKey": "ollama-local",
+        "api": "openai-completions",
+        "models": [
+          {
+            "id": "qwen2.5:0.5b",
+            "name": "Qwen 2.5 0.5B",
+            "reasoning": false,
+            "input": ["text"],
+            "cost": {
+              "input": 0,
+              "output": 0,
+              "cacheRead": 0,
+              "cacheWrite": 0
+            },
+            "contextWindow": 32768,
+            "maxTokens": 8192
+          }
+        ]
+      }
+    }
+  },
+  "agents": {
+    "defaults": {
+      "model": {
+        "primary": "ollama/qwen2.5:0.5b"
+      },
+      "workspace": "/home/agent/.openclaw/workspace/project",
+      "compaction": {
+        "mode": "safeguard"
+      },
+      "maxConcurrent": 4,
+      "subagents": {
+        "maxConcurrent": 8
+      }
+    }
+  },
+  "messages": {
+    "ackReactionScope": "group-mentions"
+  },
+  "commands": {
+    "native": "auto",
+    "nativeSkills": "auto"
+  },
+  "channels": {},
+  "gateway": {
+    "mode": "remote",
+    "port": 18790,
+    "mode": "local",
+    "bind": "loopback",
+    "auth": {
+      "mode": "token",
+      "token": "2ac145e2572b9b2fb44717b520c22588858403a75d4a6ea2"
+    }
+  },
+  "plugins": {
+    "entries": {}
+  }
+}

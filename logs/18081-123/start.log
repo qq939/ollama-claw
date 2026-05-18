@@ -1,0 +1,8 @@
+[2026-05-18 18:26:02] user_start.sh begin
+workspace: /home/agent/.openclaw/workspace/project
+no web app entrypoint found yet; create package.json, app.py, main.py, or index.html to enable auto-start
+[2026-05-18 18:26:02] user_start.sh end
+[2026-05-18 19:10:38] user_start.sh begin
+workspace: /home/agent/.openclaw/workspace/project
+no web app entrypoint found yet; create package.json, app.py, main.py, or index.html to enable auto-start
+[2026-05-18 19:10:38] user_start.sh end

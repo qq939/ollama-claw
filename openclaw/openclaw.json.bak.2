@@ -1,0 +1,125 @@
+{
+  "agents": {
+    "defaults": {
+      "workspace": "/home/node/.openclaw/workspace",
+      "model": {
+        "primary": "ollama/qwen2.5:0.5b"
+      },
+      "models": {
+        "ollama/qwen2.5:0.5b": {}
+      }
+    }
+  },
+  "gateway": {
+    "mode": "local",
+    "auth": {
+      "mode": "token",
+      "token": "b7e4bfd923d88129f8f6daf3c524a8f51fbd7eff78cae782"
+    },
+    "port": 18789,
+    "bind": "loopback",
+    "tailscale": {
+      "mode": "off",
+      "resetOnExit": false
+    },
+    "controlUi": {
+      "allowInsecureAuth": true
+    },
+    "nodes": {
+      "denyCommands": [
+        "camera.snap",
+        "camera.clip",
+        "screen.record",
+        "contacts.add",
+        "calendar.add",
+        "reminders.add",
+        "sms.send",
+        "sms.search"
+      ]
+    }
+  },
+  "session": {
+    "dmScope": "per-channel-peer"
+  },
+  "tools": {
+    "profile": "coding"
+  },
+  "plugins": {
+    "entries": {
+      "ollama": {
+        "enabled": true
+      },
+      "clickclack": {
+        "enabled": true
+      }
+    }
+  },
+  "models": {
+    "mode": "merge",
+    "providers": {
+      "ollama": {
+        "baseUrl": "http://ollama:11434",
+        "api": "ollama",
+        "apiKey": "OLLAMA_API_KEY",
+        "models": [
+          {
+            "id": "gemma4",
+            "name": "gemma4",
+            "reasoning": false,
+            "input": [
+              "text"
+            ],
+            "cost": {
+              "input": 0,
+              "output": 0,
+              "cacheRead": 0,
+              "cacheWrite": 0
+            },
+            "contextWindow": 128000,
+            "maxTokens": 8192,
+            "compat": {
+              "supportsUsageInStreaming": true
+            }
+          },
+          {
+            "id": "qwen2.5:0.5b",
+            "name": "qwen2.5:0.5b",
+            "reasoning": false,
+            "input": [
+              "text"
+            ],
+            "cost": {
+              "input": 0,
+              "output": 0,
+              "cacheRead": 0,
+              "cacheWrite": 0
+            },
+            "contextWindow": 32768,
+            "maxTokens": 8192,
+            "compat": {
+              "supportsTools": true,
+              "supportsUsageInStreaming": true
+            }
+          }
+        ]
+      }
+    }
+  },
+  "auth": {
+    "profiles": {
+      "ollama:default": {
+        "provider": "ollama",
+        "mode": "api_key"
+      }
+    }
+  },
+  "channels": {
+    "clickclack": {
+      "enabled": true
+    }
+  },
+  "meta": {
+    "lastTouchedVersion": "2026.5.12",
+    "lastTouchedAt": "2026-05-15T05:46:05.222Z"
+  }
+}
