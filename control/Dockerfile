@@ -2,7 +2,7 @@ FROM python:3.11-slim
 
 WORKDIR /app
 
-RUN echo "https://mirrors.aliyun.com/pypi/simple/" > /etc/pip.conf || true && \
+RUN printf "[global]\nindex-url = https://mirrors.aliyun.com/pypi/simple/\ntrusted-host = mirrors.aliyun.com\n" > /etc/pip.conf && \
     apt-get update && apt-get install -y --no-install-recommends \
     curl ca-certificates sudo git \
     && rm -rf /var/lib/apt/lists/*

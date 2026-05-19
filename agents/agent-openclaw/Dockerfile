@@ -21,7 +21,8 @@ RUN sed -i 's/deb.debian.org/mirrors.aliyun.com/g' /etc/apt/sources.list.d/debia
     chmod +x /home/agent/.openclaw/workspace/project/start.sh; \
     ssh-keygen -A; \
     chown -R 501:20 /etc/ssh/ssh_host_*_key; \
-    chmod 0600 /etc/ssh/ssh_host_*_key \
+    chmod 0600 /etc/ssh/ssh_host_*_key; \
+    chown -R 501:20 /home/agent/.openclaw \
 '
 
 RUN bash -c ' \
@@ -52,6 +53,7 @@ CMD ["/bin/sh", "-lc", " \
                 j.agents.defaults.workspace=\"/home/agent/.openclaw/workspace/project\"; \
             } \
             j.gateway = j.gateway || {}; \
+            j.gateway.mode = \"remote\"; \
             j.gateway.port = 18790; \
             j.gateway.auth = j.gateway.auth || {}; \
             j.gateway.remote = j.gateway.remote || {}; \
@@ -60,8 +62,8 @@ CMD ["/bin/sh", "-lc", " \
                 j.gateway.remote.token = j.gateway.auth.token; \
             } \
             delete j.gateway.bind; \
-            delete j.gateway.mode; \
             fs.writeFileSync(p, JSON.stringify(j, null, 2)); \
+            try { fs.chmodSync(p, 0o600); } catch(e) {} \
         } \
     '; \
     if [ -f /home/agent/.openclaw/workspace/project/start.sh ] && [ -s /home/agent/.openclaw/workspace/project/start.sh ]; then \

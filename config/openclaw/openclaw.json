@@ -23,7 +23,9 @@
             "id": "qwen2.5:0.5b",
             "name": "Qwen 2.5 0.5B",
             "reasoning": false,
-            "input": ["text"],
+            "input": [
+              "text"
+            ],
             "cost": {
               "input": 0,
               "output": 0,
@@ -63,10 +65,12 @@
   "gateway": {
     "mode": "remote",
     "port": 18790,
-    "mode": "local",
-    "bind": "loopback",
     "auth": {
       "mode": "token",
+      "token": "2ac145e2572b9b2fb44717b520c22588858403a75d4a6ea2"
+    },
+    "remote": {
+      "url": "ws://172.30.0.10:18790",
       "token": "2ac145e2572b9b2fb44717b520c22588858403a75d4a6ea2"
     }
   },

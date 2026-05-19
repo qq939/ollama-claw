@@ -5,6 +5,7 @@ import os
 import re
 import sys
 import time
+import json
 from datetime import datetime, timezone, timedelta
 from io import BytesIO
 
@@ -219,7 +220,6 @@ def create_app(docker_client=None):
         openclaw_path = os.path.join(config_root, spec["config_subdir"], "openclaw.json")
         if os.path.exists(openclaw_path):
             try:
-                import json
                 with open(openclaw_path, "r", encoding="utf-8") as f:
                     data = json.load(f)
                     token = data.get("gateway", {}).get("auth", {}).get("token")
@@ -232,6 +232,105 @@ def create_app(docker_client=None):
             if token:
                 env_vars["OPENCLAW_GATEWAY_TOKEN"] = token
         return env_vars
+
+    def split_openclaw_model_name(raw_model):
+        model = (raw_model or "").strip()
+        if not model:
+            raise ValueError("model name is required")
+        if "/" in model:
+            provider, ollama_model = model.split("/", 1)
+            if provider != "ollama":
+                raise ValueError("Only ollama models are supported in this deployment")
+            if not ollama_model.strip():
+                raise ValueError("Ollama model name is required")
+            return f"ollama/{ollama_model.strip()}", ollama_model.strip()
+        return f"ollama/{model}", model
+
+    def upsert_openclaw_ollama_model(model_name):
+        primary_model, ollama_model = split_openclaw_model_name(model_name)
+        openclaw_path = os.path.join(app.config["CONFIG_ROOT"], "openclaw", "openclaw.json")
+        if not os.path.exists(openclaw_path):
+            raise FileNotFoundError("OpenClaw config not found")
+        with open(openclaw_path, "r", encoding="utf-8") as f:
+            data = json.load(f)
+
+        data.setdefault("models", {}).setdefault("providers", {})
+        provider = data["models"]["providers"].setdefault("ollama", {})
+        provider["baseUrl"] = "http://ollama:11434/v1"
+        provider["apiKey"] = provider.get("apiKey") or "ollama-local"
+        provider["api"] = "openai-completions"
+
+        existing = provider.get("models")
+        if not isinstance(existing, list):
+            existing = []
+        existing_by_id = {m.get("id"): m for m in existing if isinstance(m, dict) and m.get("id")}
+        model_def = existing_by_id.get(ollama_model, {})
+        model_def.update({
+            "id": ollama_model,
+            "name": model_def.get("name") or ollama_model,
+            "reasoning": bool(model_def.get("reasoning", False)),
+            "input": model_def.get("input") or ["text"],
+            "cost": model_def.get("cost") or {"input": 0, "output": 0, "cacheRead": 0, "cacheWrite": 0},
+            "contextWindow": int(model_def.get("contextWindow") or 32768),
+            "maxTokens": int(model_def.get("maxTokens") or 8192),
+        })
+        existing_by_id[ollama_model] = model_def
+        provider["models"] = list(existing_by_id.values())
+
+        data.setdefault("agents", {}).setdefault("defaults", {}).setdefault("model", {})
+        data["agents"]["defaults"]["model"]["primary"] = primary_model
+        data["agents"]["defaults"]["workspace"] = PROJECT_PATH
+
+        gateway = data.setdefault("gateway", {})
+        gateway["mode"] = "remote"
+        gateway["port"] = int(os.environ.get("OPENCLAW_GATEWAY_PORT", "18790"))
+        gateway.pop("bind", None)
+        gateway.setdefault("auth", {}).setdefault("mode", "token")
+        token = gateway.get("auth", {}).get("token") or os.environ.get("OPENCLAW_GATEWAY_TOKEN")
+        if token:
+            gateway["auth"]["token"] = token
+        gateway.setdefault("remote", {})
+        gateway["remote"]["url"] = f"ws://{os.environ.get('OPENCLAW_GATEWAY_HOST', '172.30.0.10')}:{os.environ.get('OPENCLAW_GATEWAY_PORT', '18790')}"
+        if token:
+            gateway["remote"]["token"] = token
+
+        with open(openclaw_path, "w", encoding="utf-8") as f:
+            json.dump(data, f, indent=2, ensure_ascii=False)
+            f.write("\n")
+        return {
+            "config_path": openclaw_path,
+            "primary_model": primary_model,
+            "ollama_model": ollama_model,
+        }
+
+    def pull_ollama_model_async(ollama_model):
+        client = docker_client_or_default()
+        ollama_container = client.containers.get("ollama")
+        ollama_container.exec_run(["ollama", "pull", ollama_model], detach=True, tty=False)
+        return {"ollama_container": "ollama", "model": ollama_model}
+
+    def restart_openclaw_gateway():
+        gateway = docker_client_or_default().containers.get(os.environ.get(GATEWAY_CONTAINER_ENV, "openclaw-gateway"))
+        gateway.restart()
+        return gateway.name
+
+    def recreate_managed_agents_after_model_change():
+        recreated = []
+        errors = {}
+        gateway_token = ""
+        for c in managed_containers():
+            try:
+                payload = recreate_agent(c.name)
+                add_frpc_rule(payload["host_port"])
+                scp_rules_to_container(payload["container_name"], PROJECT_PATH)
+                recreated.append(payload)
+                if not gateway_token:
+                    gateway_token = openclaw_env(AGENT_SPECS[payload["agent_type"]]).get("OPENCLAW_GATEWAY_TOKEN", "")
+            except Exception as e:
+                errors[c.name] = str(e)
+        if gateway_token:
+            auto_pair_openclaw_client(gateway_token, timeout_seconds=20)
+        return recreated, errors
 
     def auto_pair_openclaw_client(token, timeout_seconds=20):
         if not token:
@@ -305,8 +404,14 @@ console.log(count);
             try:
                 result = gateway.exec_run(["/bin/sh", "-lc", cmd], user=AGENT_RUNTIME_USER)
                 output = result.output.decode("utf-8", errors="replace").strip() if isinstance(result.output, bytes) else str(result.output).strip()
-                if result.exit_code == 0 and output.splitlines()[-1:] == ["1"]:
-                    print("[pairing] auto-approved openclaw client", flush=True, file=sys.stderr)
+                approved_count = 0
+                if result.exit_code == 0 and output.splitlines():
+                    try:
+                        approved_count = int(output.splitlines()[-1])
+                    except ValueError:
+                        approved_count = 0
+                if approved_count > 0:
+                    print(f"[pairing] auto-approved {approved_count} openclaw client(s)", flush=True, file=sys.stderr)
                     return True
             except Exception as e:
                 print(f"[pairing] auto-approve attempt failed: {e}", flush=True, file=sys.stderr)
@@ -1233,83 +1338,60 @@ sed -e 's/\x1b\[[0-?]*[ -\/]*[@-~]//g' "$out_file" | tail -120 >> "{log_path}"
 
     @app.post("/api/openclaw/model")
     def api_update_openclaw_model():
-        """更新 OpenClaw 默认模型配置"""
+        """更新 OpenClaw 默认模型配置，触发 Ollama 拉取，并重建运行中的 agent 容器"""
         body = request.get_json(silent=True) or {}
         model_name = (body.get("model") or "").strip()
-        if not model_name:
-            return jsonify({"error": "model name is required"}), 400
-
         try:
-            config_root = app.config["CONFIG_ROOT"]
-            openclaw_path = os.path.join(config_root, "openclaw", "openclaw.json")
-            if not os.path.exists(openclaw_path):
-                return jsonify({"error": "OpenClaw config not found"}), 404
-
-            with open(openclaw_path, "r", encoding="utf-8") as f:
-                data = json.load(f)
-
-            if "agents" not in data:
-                data["agents"] = {}
-            if "defaults" not in data["agents"]:
-                data["agents"]["defaults"] = {}
-            if "model" not in data["agents"]["defaults"]:
-                data["agents"]["defaults"]["model"] = {}
-
-            data["agents"]["defaults"]["model"]["primary"] = model_name
-
-            with open(openclaw_path, "w", encoding="utf-8") as f:
-                json.dump(data, f, indent=2, ensure_ascii=False)
-
-            recreated_agents = []
-            errors = {}
-
-            for c in managed_containers():
-                try:
-                    payload = recreate_agent(c.name)
-                    add_frpc_rule(payload["host_port"])
-                    scp_rules_to_container(payload["container_name"], PROJECT_PATH)
-                    recreated_agents.append(payload["container_name"])
-                except Exception as e:
-                    errors[c.name] = str(e)
+            model_info = upsert_openclaw_ollama_model(model_name)
+            pull_info = pull_ollama_model_async(model_info["ollama_model"])
+            restarted_gateway = restart_openclaw_gateway()
+            # Give the gateway a moment to reload config before agents reconnect.
+            time.sleep(3)
+            recreated_agents, errors = recreate_managed_agents_after_model_change()
 
             return jsonify({
                 "ok": True,
-                "model": model_name,
-                "config_path": openclaw_path,
+                "model": model_info["primary_model"],
+                "ollama_model": model_info["ollama_model"],
+                "config_path": model_info["config_path"],
+                "ollama_pull": pull_info,
+                "restarted_gateway": restarted_gateway,
                 "recreated_agents": recreated_agents,
                 "recreation_errors": errors,
                 "updated_at": now_iso(),
             })
+        except ValueError as e:
+            return jsonify({"error": str(e)}), 400
+        except FileNotFoundError as e:
+            return jsonify({"error": str(e)}), 404
+        except docker.errors.NotFound as e:
+            return jsonify({"error": str(e)}), 404
         except Exception as e:
             return jsonify({"error": str(e)}), 500
+
+    @app.post("/api/openclaw/model/deploy")
+    def api_deploy_openclaw_model():
+        return api_update_openclaw_model()
 
     @app.post("/api/ollama/models/pull")
     def api_ollama_pull_model():
         """下载模型到 Ollama"""
         body = request.get_json(silent=True) or {}
         model_name = (body.get("model") or "").strip()
-        if not model_name:
-            return jsonify({"error": "model name is required"}), 400
-
         try:
-            client = docker_client_or_default()
-            try:
-                ollama_container = client.containers.get("ollama")
-            except docker.errors.NotFound:
-                return jsonify({"error": "Ollama container not found"}), 404
-
-            result = ollama_container.exec_run(
-                ["ollama", "pull", model_name],
-                detach=True,
-                tty=False,
-            )
+            _, ollama_model = split_openclaw_model_name(model_name)
+            pull_info = pull_ollama_model_async(ollama_model)
 
             return jsonify({
                 "ok": True,
-                "model": model_name,
-                "message": f"Started pulling model '{model_name}'. Check logs for progress.",
-                "ollama_container": "ollama",
+                "model": ollama_model,
+                "message": f"Started pulling model '{ollama_model}'. Check logs for progress.",
+                "ollama_container": pull_info["ollama_container"],
             })
+        except ValueError as e:
+            return jsonify({"error": str(e)}), 400
+        except docker.errors.NotFound:
+            return jsonify({"error": "Ollama container not found"}), 404
         except Exception as e:
             return jsonify({"error": str(e)}), 500
 
@@ -1582,8 +1664,8 @@ sed -e 's/\x1b\[[0-?]*[ -\/]*[@-~]//g' "$out_file" | tail -120 >> "{log_path}"
                 <span id="modelStatus" class="model-status"></span>
               </div>
               <div class="model-row">
-                <input id="modelName" placeholder="输入模型名称（如 llama3.3）" style="min-width: 200px;" />
-                <button id="setModelBtn" style="background: #3AE374; color: #000;">设置默认模型</button>
+                <input id="modelName" placeholder="输入模型名称（如 qwen2.5:0.5b）" style="min-width: 240px;" />
+                <button id="deployModelBtn" style="background: #3AE374; color: #000;">提交并部署</button>
                 <button id="pullModelBtn" style="background: #2196F3; color: #fff;">下载模型到 Ollama</button>
                 <button id="refreshModelsBtn">刷新模型列表</button>
               </div>
@@ -1667,7 +1749,7 @@ sed -e 's/\x1b\[[0-?]*[ -\/]*[@-~]//g' "$out_file" | tail -120 >> "{log_path}"
           const data = await res.json();
           const modelList = document.getElementById("modelList");
           if (data.error) {{
-            modelList.innerHTML = `<div style="color: #FF4D4D;">错误: ${data.error}</div>`;
+            modelList.innerHTML = `<div style="color: #FF4D4D;">错误: ${{data.error}}</div>`;
             return;
           }}
           if (!data.models || data.models.length === 0) {{
@@ -1683,7 +1765,7 @@ sed -e 's/\x1b\[[0-?]*[ -\/]*[@-~]//g' "$out_file" | tail -120 >> "{log_path}"
             </div>
           `).join('');
         }} catch (e) {{
-          document.getElementById("modelList").innerHTML = `<div style="color: #FF4D4D;">错误: ${e.message}</div>`;
+          document.getElementById("modelList").innerHTML = `<div style="color: #FF4D4D;">错误: ${{e.message}}</div>`;
         }}
       }}
 
@@ -1709,17 +1791,20 @@ sed -e 's/\x1b\[[0-?]*[ -\/]*[@-~]//g' "$out_file" | tail -120 >> "{log_path}"
         }});
       }}
 
-      async function setModel() {{
+      async function deployModel() {{
         const modelName = document.getElementById("modelName").value.trim();
         if (!modelName) {{
           alert("请输入模型名称");
           return;
         }}
         const status = document.getElementById("modelStatus");
-        status.textContent = "更新中...";
+        const pullLogs = document.getElementById("pullLogs");
+        status.textContent = "提交中...";
         status.className = "model-status pulling";
+        pullLogs.style.display = "block";
+        pullLogs.textContent = `提交模型部署: ${{modelName}}\n- 更新 OpenClaw 配置\n- 向 Ollama 发送下载指令\n- 重启 gateway\n- 重建 agent 容器\n`;
         try {{
-          const res = await fetch("/api/openclaw/model", {{
+          const res = await fetch("/api/openclaw/model/deploy", {{
             method: "POST",
             headers: {{ "Content-Type": "application/json" }},
             body: JSON.stringify({{ model: modelName }}),
@@ -1728,18 +1813,29 @@ sed -e 's/\x1b\[[0-?]*[ -\/]*[@-~]//g' "$out_file" | tail -120 >> "{log_path}"
           if (!res.ok) {{
             status.textContent = "错误: " + (data.error || "未知错误");
             status.className = "model-status error";
+            pullLogs.textContent += "错误: " + (data.error || "未知错误") + "\\n";
             return;
           }}
-          status.textContent = "✓ 已更新并重建容器";
+          status.textContent = "✓ 已提交部署";
           status.className = "model-status";
-          document.getElementById("currentModel").textContent = modelName;
+          document.getElementById("currentModel").textContent = data.model || modelName;
+          pullLogs.textContent += `已写入配置: ${{data.model}}\n`;
+          pullLogs.textContent += `Ollama 下载: ${{data.ollama_model}}\n`;
+          pullLogs.textContent += `已重启 gateway: ${{data.restarted_gateway}}\n`;
+          pullLogs.textContent += `已重建 agent: ${{(data.recreated_agents || []).map(x => x.container_name || x).join(", ") || "无"}}\n`;
+          if (data.recreation_errors && Object.keys(data.recreation_errors).length) {{
+            pullLogs.textContent += `重建错误: ${{JSON.stringify(data.recreation_errors)}}\n`;
+          }}
           await refreshCards();
+          await loadOllamaModels();
+          setTimeout(checkPullStatus, 5000);
           setTimeout(() => {{
             status.textContent = "";
-          }}, 3000);
+          }}, 5000);
         }} catch (e) {{
           status.textContent = "错误: " + e.message;
           status.className = "model-status error";
+          pullLogs.textContent += "错误: " + e.message + "\\n";
         }}
       }}
 
@@ -1765,17 +1861,17 @@ sed -e 's/\x1b\[[0-?]*[ -\/]*[@-~]//g' "$out_file" | tail -120 >> "{log_path}"
           if (!res.ok) {{
             status.textContent = "错误: " + (data.error || "未知错误");
             status.className = "model-status error";
-            pullLogs.textContent += "错误: " + (data.error || "未知错误") + "\n";
+            pullLogs.textContent += "错误: " + (data.error || "未知错误") + "\\n";
             return;
           }}
-          pullLogs.textContent += data.message + "\n";
-          pullLogs.textContent += "正在后台下载，请查看 Ollama 容器日志...\n";
+          pullLogs.textContent += data.message + "\\n";
+          pullLogs.textContent += "正在后台下载，请查看 Ollama 容器日志...\\n";
           status.textContent = "下载已启动";
           setTimeout(checkPullStatus, 5000);
         }} catch (e) {{
           status.textContent = "错误: " + e.message;
           status.className = "model-status error";
-          pullLogs.textContent += "错误: " + e.message + "\n";
+          pullLogs.textContent += "错误: " + e.message + "\\n";
         }}
       }}
 
@@ -1798,7 +1894,7 @@ sed -e 's/\x1b\[[0-?]*[ -\/]*[@-~]//g' "$out_file" | tail -120 >> "{log_path}"
         }}
       }}
 
-      document.getElementById("setModelBtn").onclick = setModel;
+      document.getElementById("deployModelBtn").onclick = deployModel;
       document.getElementById("pullModelBtn").onclick = pullModel;
       document.getElementById("refreshModelsBtn").onclick = async () => {{
         await loadCurrentModel();
