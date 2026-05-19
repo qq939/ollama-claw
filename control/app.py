@@ -1191,6 +1191,163 @@ sed -e 's/\x1b\[[0-?]*[ -\/]*[@-~]//g' "$out_file" | tail -120 >> "{log_path}"
                 errors[c.name] = str(e)
         return jsonify({"ok": True, "recreated": recreated, "errors": errors, "recreated_at": now_iso()})
 
+    @app.get("/api/ollama/models")
+    def api_ollama_models():
+        """获取 Ollama 中已安装的模型列表"""
+        try:
+            import urllib.request
+            req = urllib.request.Request("http://ollama:11434/api/tags")
+            with urllib.request.urlopen(req, timeout=5) as resp:
+                data = json.loads(resp.read().decode("utf-8"))
+            models = data.get("models", [])
+            return jsonify({
+                "models": [
+                    {
+                        "name": m.get("name", ""),
+                        "size": m.get("size", 0),
+                        "modified_at": m.get("modified_at", ""),
+                    }
+                    for m in models
+                ]
+            })
+        except Exception as e:
+            return jsonify({"error": str(e), "models": []}), 500
+
+    @app.get("/api/openclaw/model")
+    def api_openclaw_model():
+        """获取当前 OpenClaw 配置的默认模型"""
+        try:
+            config_root = app.config["CONFIG_ROOT"]
+            openclaw_path = os.path.join(config_root, "openclaw", "openclaw.json")
+            if not os.path.exists(openclaw_path):
+                return jsonify({"error": "OpenClaw config not found"}), 404
+            with open(openclaw_path, "r", encoding="utf-8") as f:
+                data = json.load(f)
+            primary_model = data.get("agents", {}).get("defaults", {}).get("model", {}).get("primary", "")
+            return jsonify({
+                "model": primary_model,
+                "config_path": openclaw_path,
+            })
+        except Exception as e:
+            return jsonify({"error": str(e)}), 500
+
+    @app.post("/api/openclaw/model")
+    def api_update_openclaw_model():
+        """更新 OpenClaw 默认模型配置"""
+        body = request.get_json(silent=True) or {}
+        model_name = (body.get("model") or "").strip()
+        if not model_name:
+            return jsonify({"error": "model name is required"}), 400
+
+        try:
+            config_root = app.config["CONFIG_ROOT"]
+            openclaw_path = os.path.join(config_root, "openclaw", "openclaw.json")
+            if not os.path.exists(openclaw_path):
+                return jsonify({"error": "OpenClaw config not found"}), 404
+
+            with open(openclaw_path, "r", encoding="utf-8") as f:
+                data = json.load(f)
+
+            if "agents" not in data:
+                data["agents"] = {}
+            if "defaults" not in data["agents"]:
+                data["agents"]["defaults"] = {}
+            if "model" not in data["agents"]["defaults"]:
+                data["agents"]["defaults"]["model"] = {}
+
+            data["agents"]["defaults"]["model"]["primary"] = model_name
+
+            with open(openclaw_path, "w", encoding="utf-8") as f:
+                json.dump(data, f, indent=2, ensure_ascii=False)
+
+            recreated_agents = []
+            errors = {}
+
+            for c in managed_containers():
+                try:
+                    payload = recreate_agent(c.name)
+                    add_frpc_rule(payload["host_port"])
+                    scp_rules_to_container(payload["container_name"], PROJECT_PATH)
+                    recreated_agents.append(payload["container_name"])
+                except Exception as e:
+                    errors[c.name] = str(e)
+
+            return jsonify({
+                "ok": True,
+                "model": model_name,
+                "config_path": openclaw_path,
+                "recreated_agents": recreated_agents,
+                "recreation_errors": errors,
+                "updated_at": now_iso(),
+            })
+        except Exception as e:
+            return jsonify({"error": str(e)}), 500
+
+    @app.post("/api/ollama/models/pull")
+    def api_ollama_pull_model():
+        """下载模型到 Ollama"""
+        body = request.get_json(silent=True) or {}
+        model_name = (body.get("model") or "").strip()
+        if not model_name:
+            return jsonify({"error": "model name is required"}), 400
+
+        try:
+            client = docker_client_or_default()
+            try:
+                ollama_container = client.containers.get("ollama")
+            except docker.errors.NotFound:
+                return jsonify({"error": "Ollama container not found"}), 404
+
+            result = ollama_container.exec_run(
+                ["ollama", "pull", model_name],
+                detach=True,
+                tty=False,
+            )
+
+            return jsonify({
+                "ok": True,
+                "model": model_name,
+                "message": f"Started pulling model '{model_name}'. Check logs for progress.",
+                "ollama_container": "ollama",
+            })
+        except Exception as e:
+            return jsonify({"error": str(e)}), 500
+
+    @app.get("/api/ollama/models/pull/status")
+    def api_ollama_pull_status():
+        """获取 Ollama pull 任务状态"""
+        try:
+            client = docker_client_or_default()
+            ollama_container = client.containers.get("ollama")
+            result = ollama_container.exec_run(
+                ["ps", "aux"],
+                user="root",
+            )
+            output = result.output.decode("utf-8", errors="replace")
+            pulling = "ollama pull" in output
+            return jsonify({
+                "pulling": pulling,
+                "output": output,
+            })
+        except Exception as e:
+            return jsonify({"error": str(e)}), 500
+
+    @app.get("/api/ollama/models/pull/logs")
+    def api_ollama_pull_logs():
+        """获取 Ollama pull 日志"""
+        try:
+            client = docker_client_or_default()
+            ollama_container = client.containers.get("ollama")
+            result = ollama_container.exec_run(
+                ["tail", "-50", "/root/.ollama/ollama.log"],
+            )
+            output = result.output.decode("utf-8", errors="replace")
+            return jsonify({
+                "logs": output,
+            })
+        except Exception as e:
+            return jsonify({"error": str(e)}), 500
+
     @app.get("/")
     def index():
         poll_ms = 5000
@@ -1321,6 +1478,83 @@ sed -e 's/\x1b\[[0-?]*[ -\/]*[@-~]//g' "$out_file" | tail -120 >> "{log_path}"
       .status-running {{ color: var(--ok); }}
       .status-other {{ color: var(--warn); }}
       .small {{ color: var(--muted); font-size: 11px; margin-left: 8px; }}
+      .model-panel {{
+        margin-top: 14px;
+        border: 1px solid rgba(255,255,255,0.13);
+        border-radius: 14px;
+        background: linear-gradient(180deg, rgba(255,255,255,0.08), rgba(255,255,255,0.03));
+        box-shadow: var(--shadow);
+        padding: 14px;
+      }}
+      .model-section {{
+        margin-bottom: 12px;
+      }}
+      .model-section-title {{
+        font-size: 13px;
+        font-weight: 600;
+        color: #3AE374;
+        margin-bottom: 8px;
+      }}
+      .model-info {{
+        background: rgba(0,0,0,0.3);
+        border-radius: 8px;
+        padding: 10px;
+        margin-bottom: 10px;
+      }}
+      .model-row {{
+        display: flex;
+        gap: 8px;
+        align-items: center;
+        flex-wrap: wrap;
+      }}
+      .model-status {{
+        padding: 4px 8px;
+        border-radius: 4px;
+        font-size: 11px;
+        background: rgba(58, 227, 116, 0.2);
+        color: #3AE374;
+      }}
+      .model-status.error {{
+        background: rgba(255, 77, 77, 0.2);
+        color: #FF4D4D;
+      }}
+      .model-status.pulling {{
+        background: rgba(255, 192, 72, 0.2);
+        color: #FFC048;
+      }}
+      #modelList {{
+        max-height: 150px;
+        overflow-y: auto;
+        margin-top: 8px;
+        border: 1px solid rgba(255,255,255,0.1);
+        border-radius: 8px;
+        background: rgba(0,0,0,0.3);
+        padding: 8px;
+      }}
+      .model-item {{
+        padding: 4px 8px;
+        border-radius: 4px;
+        cursor: pointer;
+        margin-bottom: 2px;
+      }}
+      .model-item:hover {{
+        background: rgba(255,255,255,0.1);
+      }}
+      .model-item.selected {{
+        background: rgba(58, 227, 116, 0.2);
+        color: #3AE374;
+      }}
+      #pullLogs {{
+        max-height: 100px;
+        overflow-y: auto;
+        background: rgba(0,0,0,0.4);
+        border-radius: 8px;
+        padding: 8px;
+        font-size: 11px;
+        white-space: pre-wrap;
+        margin-top: 8px;
+        display: none;
+      }}
     </style>
   </head>
   <body>
@@ -1336,6 +1570,26 @@ sed -e 's/\x1b\[[0-?]*[ -\/]*[@-~]//g' "$out_file" | tail -120 >> "{log_path}"
             <input id="agentName" placeholder="输入容器名称（例如 writer）" />
             <button id="createBtn">一键创建</button>
             <span class="small" id="notice"></span>
+          </div>
+        </div>
+        <div class="model-panel">
+          <div class="model-section">
+            <div class="model-section-title">🤖 模型管理</div>
+            <div class="model-info">
+              <div style="margin-bottom: 8px;">
+                <span style="color: var(--muted);">当前 OpenClaw 模型：</span>
+                <span id="currentModel" style="color: #3AE374; font-weight: 600;">加载中...</span>
+                <span id="modelStatus" class="model-status"></span>
+              </div>
+              <div class="model-row">
+                <input id="modelName" placeholder="输入模型名称（如 llama3.3）" style="min-width: 200px;" />
+                <button id="setModelBtn" style="background: #3AE374; color: #000;">设置默认模型</button>
+                <button id="pullModelBtn" style="background: #2196F3; color: #fff;">下载模型到 Ollama</button>
+                <button id="refreshModelsBtn">刷新模型列表</button>
+              </div>
+            </div>
+            <div id="modelList"></div>
+            <div id="pullLogs"></div>
           </div>
         </div>
       </div>
@@ -1395,6 +1649,169 @@ sed -e 's/\x1b\[[0-?]*[ -\/]*[@-~]//g' "$out_file" | tail -120 >> "{log_path}"
           agentType.appendChild(op);
         }}
       }}
+
+      async function loadCurrentModel() {{
+        try {{
+          const res = await fetch("/api/openclaw/model", {{ cache: "no-store" }});
+          const data = await res.json();
+          document.getElementById("currentModel").textContent = data.model || "未设置";
+          document.getElementById("modelName").value = data.model || "";
+        }} catch (e) {{
+          document.getElementById("currentModel").textContent = "加载失败";
+        }}
+      }}
+
+      async function loadOllamaModels() {{
+        try {{
+          const res = await fetch("/api/ollama/models", {{ cache: "no-store" }});
+          const data = await res.json();
+          const modelList = document.getElementById("modelList");
+          if (data.error) {{
+            modelList.innerHTML = `<div style="color: #FF4D4D;">错误: ${data.error}</div>`;
+            return;
+          }}
+          if (!data.models || data.models.length === 0) {{
+            modelList.innerHTML = '<div style="color: #FFC048;">Ollama 中没有已安装的模型</div>';
+            return;
+          }}
+          const currentModel = document.getElementById("currentModel").textContent;
+          modelList.innerHTML = data.models.map(m => `
+            <div class="model-item ${{m.name === currentModel ? 'selected' : ''}}"
+                 data-model="${{m.name}}"
+                 onclick="selectModel('${{m.name}}')">
+              ${{m.name}} <span style="color: var(--muted);">(${{formatSize(m.size)}})</span>
+            </div>
+          `).join('');
+        }} catch (e) {{
+          document.getElementById("modelList").innerHTML = `<div style="color: #FF4D4D;">错误: ${e.message}</div>`;
+        }}
+      }}
+
+      function formatSize(bytes) {{
+        if (!bytes) return "0 B";
+        const units = ["B", "KB", "MB", "GB", "TB"];
+        let i = 0;
+        let size = bytes;
+        while (size >= 1024 && i < units.length - 1) {{
+          size /= 1024;
+          i++;
+        }}
+        return size.toFixed(1) + " " + units[i];
+      }}
+
+      function selectModel(modelName) {{
+        document.getElementById("modelName").value = modelName;
+        document.querySelectorAll(".model-item").forEach(el => {{
+          el.classList.remove("selected");
+          if (el.dataset.model === modelName) {{
+            el.classList.add("selected");
+          }}
+        }});
+      }}
+
+      async function setModel() {{
+        const modelName = document.getElementById("modelName").value.trim();
+        if (!modelName) {{
+          alert("请输入模型名称");
+          return;
+        }}
+        const status = document.getElementById("modelStatus");
+        status.textContent = "更新中...";
+        status.className = "model-status pulling";
+        try {{
+          const res = await fetch("/api/openclaw/model", {{
+            method: "POST",
+            headers: {{ "Content-Type": "application/json" }},
+            body: JSON.stringify({{ model: modelName }}),
+          }});
+          const data = await res.json();
+          if (!res.ok) {{
+            status.textContent = "错误: " + (data.error || "未知错误");
+            status.className = "model-status error";
+            return;
+          }}
+          status.textContent = "✓ 已更新并重建容器";
+          status.className = "model-status";
+          document.getElementById("currentModel").textContent = modelName;
+          await refreshCards();
+          setTimeout(() => {{
+            status.textContent = "";
+          }}, 3000);
+        }} catch (e) {{
+          status.textContent = "错误: " + e.message;
+          status.className = "model-status error";
+        }}
+      }}
+
+      async function pullModel() {{
+        const modelName = document.getElementById("modelName").value.trim();
+        if (!modelName) {{
+          alert("请输入模型名称");
+          return;
+        }}
+        const status = document.getElementById("modelStatus");
+        const pullLogs = document.getElementById("pullLogs");
+        status.textContent = "下载中...";
+        status.className = "model-status pulling";
+        pullLogs.style.display = "block";
+        pullLogs.textContent = `开始下载模型: ${{modelName}}\n`;
+        try {{
+          const res = await fetch("/api/ollama/models/pull", {{
+            method: "POST",
+            headers: {{ "Content-Type": "application/json" }},
+            body: JSON.stringify({{ model: modelName }}),
+          }});
+          const data = await res.json();
+          if (!res.ok) {{
+            status.textContent = "错误: " + (data.error || "未知错误");
+            status.className = "model-status error";
+            pullLogs.textContent += "错误: " + (data.error || "未知错误") + "\n";
+            return;
+          }}
+          pullLogs.textContent += data.message + "\n";
+          pullLogs.textContent += "正在后台下载，请查看 Ollama 容器日志...\n";
+          status.textContent = "下载已启动";
+          setTimeout(checkPullStatus, 5000);
+        }} catch (e) {{
+          status.textContent = "错误: " + e.message;
+          status.className = "model-status error";
+          pullLogs.textContent += "错误: " + e.message + "\n";
+        }}
+      }}
+
+      async function checkPullStatus() {{
+        try {{
+          const res = await fetch("/api/ollama/models/pull/status");
+          const data = await res.json();
+          const status = document.getElementById("modelStatus");
+          if (data.pulling) {{
+            status.textContent = "下载中...";
+            status.className = "model-status pulling";
+            setTimeout(checkPullStatus, 5000);
+          }} else {{
+            status.textContent = "✓ 下载完成";
+            status.className = "model-status";
+            await loadOllamaModels();
+          }}
+        }} catch (e) {{
+          console.error("Check pull status error:", e);
+        }}
+      }}
+
+      document.getElementById("setModelBtn").onclick = setModel;
+      document.getElementById("pullModelBtn").onclick = pullModel;
+      document.getElementById("refreshModelsBtn").onclick = async () => {{
+        await loadCurrentModel();
+        await loadOllamaModels();
+      }};
+
+      (async () => {{
+        await loadTypes();
+        await loadCurrentModel();
+        await loadOllamaModels();
+        await refreshCards();
+        setInterval(refreshCards, {poll_ms});
+      }})();
 
       function makeCard(item) {{
         const div = document.createElement("div");
@@ -1714,8 +2131,6 @@ sed -e 's/\x1b\[[0-?]*[ -\/]*[@-~]//g' "$out_file" | tail -120 >> "{log_path}"
         await loadTypes();
         await refreshCards();
         setInterval(refreshCards, {poll_ms});
-        
-        let tabIndex = 0;
         document.addEventListener('keydown', (e) => {{
           if (e.key === 'Tab') {{
             e.preventDefault();
@@ -1752,22 +2167,7 @@ sed -e 's/\x1b\[[0-?]*[ -\/]*[@-~]//g' "$out_file" | tail -120 >> "{log_path}"
         document.addEventListener('click', (e) => {{
           const card = e.target.closest('.card[data-name]');
           if (!card) return;
-          const cardEls = Array.from(document.querySelectorAll('.card[data-name]'));
-          const clickedIndex = cardEls.indexOf(card);
-          if (clickedIndex < 0) return;
-          tabIndex = clickedIndex;
-          cardEls.forEach((c, i) => {{
-            if (i !== clickedIndex) {{
-              c.classList.add('collapsed');
-              c.classList.remove('tab-selected');
-              const btn = c.querySelector('.collapse-btn');
-              if (btn) btn.textContent = '▶';
-            }}
-          }});
           card.classList.remove('collapsed');
-          card.classList.add('tab-selected');
-          const btn = card.querySelector('.collapse-btn');
-          if (btn) btn.textContent = '▼';
         }});
       }})();
     </script>

@@ -12,6 +12,7 @@ services:
     build:
       context: ./agents/ollama
       dockerfile: Dockerfile
+    image: ollama-claw-ollama:latest
     container_name: ollama
     restart: unless-stopped
     volumes:
@@ -27,6 +28,7 @@ services:
     build:
       context: ./agents/gateway
       dockerfile: Dockerfile
+    image: ollama-claw-gateway:latest
     container_name: openclaw-gateway
     restart: unless-stopped
     networks:
@@ -45,6 +47,8 @@ services:
   control-18080:
     build:
       context: ./control
+      dockerfile: Dockerfile
+    image: ollama-claw-control:latest
     container_name: control-18080
     restart: unless-stopped
     ports:
@@ -75,5 +79,8 @@ services:
       context: ./agents/agent-openclaw
       dockerfile: Dockerfile
     image: ollama-claw-agent-openclaw:latest
-    profiles: ["templates"]
+    container_name: ollama-claw-agent-openclaw-template
     command: ["sleep", "infinity"]
+
+volumes:
+  ollama-data:

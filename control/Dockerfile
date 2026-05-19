@@ -2,12 +2,13 @@ FROM python:3.11-slim
 
 WORKDIR /app
 
-RUN apt-get update && apt-get install -y --no-install-recommends \
+RUN echo "https://mirrors.aliyun.com/pypi/simple/" > /etc/pip.conf || true && \
+    apt-get update && apt-get install -y --no-install-recommends \
     curl ca-certificates sudo git \
     && rm -rf /var/lib/apt/lists/*
 
 COPY requirements.txt .
-RUN pip install --no-cache-dir -r requirements.txt
+RUN pip install --no-cache-dir -i https://mirrors.aliyun.com/pypi/simple/ -r requirements.txt
 
 COPY app.py .
 

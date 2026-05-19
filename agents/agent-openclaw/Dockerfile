@@ -1,6 +1,7 @@
 FROM node:22-bookworm-slim
 
-RUN bash -c ' \
+RUN sed -i 's/deb.debian.org/mirrors.aliyun.com/g' /etc/apt/sources.list.d/debian.sources && \
+    bash -c ' \
     for attempt in 1 2 3; do \
         set +e; \
         apt-get update && apt-get install -y --no-install-recommends ca-certificates sudo curl git coreutils openssh-server fonts-noto-cjk python3 python3-pip && break; \
@@ -20,14 +21,13 @@ RUN bash -c ' \
     chmod +x /home/agent/.openclaw/workspace/project/start.sh; \
     ssh-keygen -A; \
     chown -R 501:20 /etc/ssh/ssh_host_*_key; \
-    chmod 0600 /etc/ssh/ssh_host_*_key; \
-    chown -R 501:20 /home/agent/.openclaw \
+    chmod 0600 /etc/ssh/ssh_host_*_key \
 '
 
 RUN bash -c ' \
     for attempt in 1 2 3; do \
         set +e; \
-        npm install -g openclaw@2026.2.9 && break; \
+        npm install -g openclaw@2026.2.9 --registry=https://registry.npmmirror.com && break; \
         sleep 15; \
     done \
 '
@@ -40,12 +40,11 @@ CMD ["/bin/sh", "-lc", " \
     mkdir -p \"$HOME/.openclaw\"; \
     if [ -d /agent-config ]; then cp -R -f /agent-config/. \"$HOME/.openclaw/\"; fi; \
     mkdir -p /home/agent/.openclaw/workspace/project/logs; \
-    sudo /usr/sbin/sshd; \
+    /usr/sbin/sshd; \
     node -e ' \
         const fs=require(\"fs\"); \
         const gh=process.env.OPENCLAW_GATEWAY_HOST||\"172.30.0.10\"; \
         const gp=process.env.OPENCLAW_GATEWAY_PORT||\"18790\"; \
-        const gt=process.env.OPENCLAW_GATEWAY_TOKEN||\"\"; \
         const p=process.env.HOME+\"/.openclaw/openclaw.json\"; \
         if(fs.existsSync(p)){ \
             const j=JSON.parse(fs.readFileSync(p,\"utf8\")); \
@@ -53,19 +52,17 @@ CMD ["/bin/sh", "-lc", " \
                 j.agents.defaults.workspace=\"/home/agent/.openclaw/workspace/project\"; \
             } \
             j.gateway = j.gateway || {}; \
-            j.gateway.mode = \"remote\"; \
             j.gateway.port = 18790; \
             j.gateway.auth = j.gateway.auth || {}; \
-            if(gt){ j.gateway.auth.token = gt; } \
             j.gateway.remote = j.gateway.remote || {}; \
             j.gateway.remote.url = \"ws://\" + gh + \":\" + gp; \
             if(j.gateway.auth.token){ \
                 j.gateway.remote.token = j.gateway.auth.token; \
             } \
             delete j.gateway.bind; \
+            delete j.gateway.mode; \
             fs.writeFileSync(p, JSON.stringify(j, null, 2)); \
         } \
-        try { fs.chmodSync(p, 0o600); } catch(e) {} \
     '; \
     if [ -f /home/agent/.openclaw/workspace/project/start.sh ] && [ -s /home/agent/.openclaw/workspace/project/start.sh ]; then \
         chmod +x /home/agent/.openclaw/workspace/project/start.sh; \
