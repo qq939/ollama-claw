@@ -6,6 +6,8 @@ import re
 import sys
 import time
 import json
+import threading
+import urllib.request
 from datetime import datetime, timezone, timedelta
 from io import BytesIO
 
@@ -83,6 +85,25 @@ def create_app(docker_client=None):
     app.config["HOST_WORKSPACES_ROOT"] = host_ws
     app.config["HOST_LOGS_ROOT"] = os.path.join(os.path.dirname(host_ws), "logs")
     app.config["PUBLIC_PREVIEW_BASE_URL"] = os.environ.get("PUBLIC_PREVIEW_BASE_URL", "http://localhost").rstrip("/")
+    ollama_pull_jobs = {}
+
+    def ollama_base_url():
+        return os.environ.get("OLLAMA_BASE_URL", "http://ollama:11434").rstrip("/")
+
+    def ollama_json_request(path, payload=None, timeout=10):
+        data = None
+        headers = {}
+        if payload is not None:
+            data = json.dumps(payload).encode("utf-8")
+            headers["Content-Type"] = "application/json"
+        req = urllib.request.Request(f"{ollama_base_url()}{path}", data=data, headers=headers)
+        with urllib.request.urlopen(req, timeout=timeout) as resp:
+            raw = resp.read().decode("utf-8")
+        return json.loads(raw) if raw else {}
+
+    def list_ollama_models():
+        data = ollama_json_request("/api/tags", timeout=5)
+        return data.get("models", [])
 
     def docker_client_or_default():
         configured = app.config.get("DOCKER_CLIENT")
@@ -304,10 +325,28 @@ def create_app(docker_client=None):
         }
 
     def pull_ollama_model_async(ollama_model):
-        client = docker_client_or_default()
-        ollama_container = client.containers.get("ollama")
-        ollama_container.exec_run(["ollama", "pull", ollama_model], detach=True, tty=False)
-        return {"ollama_container": "ollama", "model": ollama_model}
+        started_at = now_iso()
+        ollama_pull_jobs[ollama_model] = {"status": "pulling", "started_at": started_at, "error": ""}
+
+        def run_pull():
+            try:
+                ollama_json_request("/api/pull", {"name": ollama_model, "stream": False}, timeout=60 * 60)
+                ollama_pull_jobs[ollama_model] = {
+                    "status": "done",
+                    "started_at": started_at,
+                    "finished_at": now_iso(),
+                    "error": "",
+                }
+            except Exception as e:
+                ollama_pull_jobs[ollama_model] = {
+                    "status": "error",
+                    "started_at": started_at,
+                    "finished_at": now_iso(),
+                    "error": str(e),
+                }
+
+        threading.Thread(target=run_pull, name=f"ollama-pull-{ollama_model}", daemon=True).start()
+        return {"method": "ollama_http_api", "base_url": ollama_base_url(), "model": ollama_model, "started_at": started_at}
 
     def restart_openclaw_gateway():
         gateway = docker_client_or_default().containers.get(os.environ.get(GATEWAY_CONTAINER_ENV, "openclaw-gateway"))
@@ -1300,11 +1339,7 @@ sed -e 's/\x1b\[[0-?]*[ -\/]*[@-~]//g' "$out_file" | tail -120 >> "{log_path}"
     def api_ollama_models():
         """获取 Ollama 中已安装的模型列表"""
         try:
-            import urllib.request
-            req = urllib.request.Request("http://ollama:11434/api/tags")
-            with urllib.request.urlopen(req, timeout=5) as resp:
-                data = json.loads(resp.read().decode("utf-8"))
-            models = data.get("models", [])
+            models = list_ollama_models()
             return jsonify({
                 "models": [
                     {
@@ -1385,8 +1420,8 @@ sed -e 's/\x1b\[[0-?]*[ -\/]*[@-~]//g' "$out_file" | tail -120 >> "{log_path}"
             return jsonify({
                 "ok": True,
                 "model": ollama_model,
-                "message": f"Started pulling model '{ollama_model}'. Check logs for progress.",
-                "ollama_container": pull_info["ollama_container"],
+                "message": f"Started pulling model '{ollama_model}' via Ollama HTTP API.",
+                "ollama_pull": pull_info,
             })
         except ValueError as e:
             return jsonify({"error": str(e)}), 400
@@ -1399,17 +1434,13 @@ sed -e 's/\x1b\[[0-?]*[ -\/]*[@-~]//g' "$out_file" | tail -120 >> "{log_path}"
     def api_ollama_pull_status():
         """获取 Ollama pull 任务状态"""
         try:
-            client = docker_client_or_default()
-            ollama_container = client.containers.get("ollama")
-            result = ollama_container.exec_run(
-                ["ps", "aux"],
-                user="root",
-            )
-            output = result.output.decode("utf-8", errors="replace")
-            pulling = "ollama pull" in output
+            models = list_ollama_models()
+            installed = [m.get("name", "") for m in models]
+            pulling = any(job.get("status") == "pulling" for job in ollama_pull_jobs.values())
             return jsonify({
                 "pulling": pulling,
-                "output": output,
+                "installed": installed,
+                "jobs": ollama_pull_jobs,
             })
         except Exception as e:
             return jsonify({"error": str(e)}), 500
@@ -1418,14 +1449,8 @@ sed -e 's/\x1b\[[0-?]*[ -\/]*[@-~]//g' "$out_file" | tail -120 >> "{log_path}"
     def api_ollama_pull_logs():
         """获取 Ollama pull 日志"""
         try:
-            client = docker_client_or_default()
-            ollama_container = client.containers.get("ollama")
-            result = ollama_container.exec_run(
-                ["tail", "-50", "/root/.ollama/ollama.log"],
-            )
-            output = result.output.decode("utf-8", errors="replace")
             return jsonify({
-                "logs": output,
+                "logs": json.dumps(ollama_pull_jobs, ensure_ascii=False, indent=2),
             })
         except Exception as e:
             return jsonify({"error": str(e)}), 500
