@@ -86,9 +86,25 @@ def create_app(docker_client=None):
     app.config["HOST_LOGS_ROOT"] = os.path.join(os.path.dirname(host_ws), "logs")
     app.config["PUBLIC_PREVIEW_BASE_URL"] = os.environ.get("PUBLIC_PREVIEW_BASE_URL", "http://localhost").rstrip("/")
     ollama_pull_jobs = {}
+    ollama_api_state = {"base_url": None}
 
-    def ollama_base_url():
-        return os.environ.get("OLLAMA_BASE_URL", "http://ollama:11434").rstrip("/")
+    def ollama_base_urls():
+        configured = os.environ.get("OLLAMA_BASE_URL", "").strip()
+        candidates = []
+        if configured:
+            candidates.extend([item.strip() for item in configured.split(",") if item.strip()])
+        candidates.extend([
+            "http://ollama:11434",
+            "http://host.docker.internal:11434",
+        ])
+        if ollama_api_state.get("base_url"):
+            candidates.insert(0, ollama_api_state["base_url"])
+        deduped = []
+        for item in candidates:
+            normalized = item.rstrip("/")
+            if normalized and normalized not in deduped:
+                deduped.append(normalized)
+        return deduped
 
     def ollama_json_request(path, payload=None, timeout=10):
         data = None
@@ -96,10 +112,17 @@ def create_app(docker_client=None):
         if payload is not None:
             data = json.dumps(payload).encode("utf-8")
             headers["Content-Type"] = "application/json"
-        req = urllib.request.Request(f"{ollama_base_url()}{path}", data=data, headers=headers)
-        with urllib.request.urlopen(req, timeout=timeout) as resp:
-            raw = resp.read().decode("utf-8")
-        return json.loads(raw) if raw else {}
+        errors = []
+        for base_url in ollama_base_urls():
+            try:
+                req = urllib.request.Request(f"{base_url}{path}", data=data, headers=headers)
+                with urllib.request.urlopen(req, timeout=timeout) as resp:
+                    raw = resp.read().decode("utf-8")
+                ollama_api_state["base_url"] = base_url
+                return json.loads(raw) if raw else {}
+            except Exception as e:
+                errors.append(f"{base_url}: {e}")
+        raise RuntimeError("Unable to reach Ollama API. Tried " + "; ".join(errors))
 
     def list_ollama_models():
         data = ollama_json_request("/api/tags", timeout=5)
@@ -346,7 +369,7 @@ def create_app(docker_client=None):
                 }
 
         threading.Thread(target=run_pull, name=f"ollama-pull-{ollama_model}", daemon=True).start()
-        return {"method": "ollama_http_api", "base_url": ollama_base_url(), "model": ollama_model, "started_at": started_at}
+        return {"method": "ollama_http_api", "base_urls": ollama_base_urls(), "model": ollama_model, "started_at": started_at}
 
     def restart_openclaw_gateway():
         gateway = docker_client_or_default().containers.get(os.environ.get(GATEWAY_CONTAINER_ENV, "openclaw-gateway"))
