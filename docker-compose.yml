@@ -9,10 +9,7 @@ networks:
 
 services:
   ollama:
-    build:
-      context: ./agents/ollama
-      dockerfile: Dockerfile
-    image: ollama-claw-ollama:latest
+    image: ollama/ollama:latest
     container_name: ollama
     restart: unless-stopped
     volumes:
