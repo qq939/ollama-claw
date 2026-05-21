@@ -20,6 +20,7 @@ services:
       - ollama-claw-network
     environment:
       - OLLAMA_HOST=0.0.0.0:11434
+      - OLLAMA_MODELS=/root/.ollama/models
 
   openclaw-gateway:
     build:

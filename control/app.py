@@ -1656,6 +1656,13 @@ sed -e 's/\x1b\[[0-?]*[ -\/]*[@-~]//g' "$out_file" | tail -120 >> "{log_path}"
         color: #3AE374;
         margin-bottom: 8px;
       }}
+      .model-section-title a {{
+        color: #3AE374;
+        text-decoration: none;
+      }}
+      .model-section-title a:hover {{
+        text-decoration: underline;
+      }}
       .model-info {{
         background: rgba(0,0,0,0.3);
         border-radius: 8px;
@@ -1735,7 +1742,7 @@ sed -e 's/\x1b\[[0-?]*[ -\/]*[@-~]//g' "$out_file" | tail -120 >> "{log_path}"
         </div>
         <div class="model-panel">
           <div class="model-section">
-            <div class="model-section-title">🤖 模型管理</div>
+            <div class="model-section-title"><a href="https://ollama.com/library" target="_blank" class="model-link-btn" title="浏览 Ollama 模型库 (opens in new tab)">🤖 模型管理 🌐</a></div>
             <div class="model-info">
               <div style="margin-bottom: 8px;">
                 <span style="color: var(--muted);">当前 OpenClaw 模型：</span>

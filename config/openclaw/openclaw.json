@@ -74,7 +74,7 @@
   "agents": {
     "defaults": {
       "model": {
-        "primary": "ollama/qwen3.5:9b"
+        "primary": "ollama/qwen2.5:0.5b"
       },
       "workspace": "/home/agent/.openclaw/workspace/project",
       "compaction": {
