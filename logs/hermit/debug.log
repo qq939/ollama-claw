@@ -1,0 +1,7 @@
+
+=== GIT COMMITS DEBUG ===
+container: 18081-djsfo
+cmd: cd /home/agent/.openclaw/workspace/project && git -c safe.directory=* rev-parse --short HEAD && git -c safe.directory=* log --format="%h %ad %s" --date=short -20
+exit_code: 128
+output:
+fatal: Needed a single revision

@@ -124,6 +124,23 @@ def create_app(docker_client=None):
                 errors.append(f"{base_url}: {e}")
         raise RuntimeError("Unable to reach Ollama API. Tried " + "; ".join(errors))
 
+    def ollama_stream_request(path, payload=None, timeout=60 * 60):
+        data = None
+        headers = {"Content-Type": "application/json", "Accept": "application/x-ndjson"}
+        if payload is not None:
+            data = json.dumps(payload).encode("utf-8")
+        errors = []
+        for base_url in ollama_base_urls():
+            try:
+                req = urllib.request.Request(f"{base_url}{path}", data=data, headers=headers)
+                with urllib.request.urlopen(req, timeout=timeout) as resp:
+                    for line in resp:
+                        if line:
+                            yield json.loads(line.decode("utf-8"))
+                return
+            except Exception as e:
+                errors.append(f"{base_url}: {e}")
+
     def list_ollama_models():
         data = ollama_json_request("/api/tags", timeout=5)
         return data.get("models", [])
@@ -349,11 +366,25 @@ def create_app(docker_client=None):
 
     def pull_ollama_model_async(ollama_model):
         started_at = now_iso()
-        ollama_pull_jobs[ollama_model] = {"status": "pulling", "started_at": started_at, "error": ""}
+        ollama_pull_jobs[ollama_model] = {"status": "pulling", "started_at": started_at, "error": "", "progress": 0, "total": None, "digest": ""}
 
         def run_pull():
             try:
-                ollama_json_request("/api/pull", {"name": ollama_model, "stream": False}, timeout=60 * 60)
+                for chunk in ollama_stream_request("/api/pull", {"name": ollama_model, "stream": True}, timeout=60 * 60):
+                    if "error" in chunk:
+                        ollama_pull_jobs[ollama_model]["status"] = "error"
+                        ollama_pull_jobs[ollama_model]["error"] = chunk["error"]
+                        return
+                    if "status" in chunk:
+                        ollama_pull_jobs[ollama_model]["status_message"] = chunk["status"]
+                    if "progress" in chunk:
+                        ollama_pull_jobs[ollama_model]["progress"] = chunk["progress"]
+                    if "total" in chunk:
+                        ollama_pull_jobs[ollama_model]["total"] = chunk["total"]
+                    if "digest" in chunk:
+                        ollama_pull_jobs[ollama_model]["digest"] = chunk["digest"]
+                    if "completed" in chunk:
+                        ollama_pull_jobs[ollama_model]["completed"] = chunk["completed"]
                 ollama_pull_jobs[ollama_model] = {
                     "status": "done",
                     "started_at": started_at,
@@ -1928,13 +1959,34 @@ sed -e 's/\x1b\[[0-?]*[ -\/]*[@-~]//g' "$out_file" | tail -120 >> "{log_path}"
           const res = await fetch("/api/ollama/models/pull/status");
           const data = await res.json();
           const status = document.getElementById("modelStatus");
+          const pullLogs = document.getElementById("pullLogs");
           if (data.pulling) {{
-            status.textContent = "下载中...";
+            const jobs = data.jobs || {{}};
+            const jobKeys = Object.keys(jobs);
+            if (jobKeys.length > 0) {{
+              const job = jobs[jobKeys[0]];
+              let statusText = "下载中";
+              if (job.status_message) {{
+                statusText += ": " + job.status_message;
+              }}
+              if (job.progress !== undefined) {{
+                statusText += " (" + Math.round(job.progress) + "%)";
+              }}
+              status.textContent = statusText;
+              if (pullLogs) {{
+                pullLogs.textContent = (job.status_message || "下载中") + "\\n";
+              }}
+            }} else {{
+              status.textContent = "下载中...";
+            }}
             status.className = "model-status pulling";
-            setTimeout(checkPullStatus, 5000);
+            setTimeout(checkPullStatus, 2000);
           }} else {{
             status.textContent = "✓ 下载完成";
             status.className = "model-status";
+            if (pullLogs) {{
+              pullLogs.textContent = "✓ 下载完成\\n";
+            }}
             await loadOllamaModels();
           }}
         }} catch (e) {{
