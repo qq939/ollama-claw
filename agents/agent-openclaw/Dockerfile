@@ -36,11 +36,18 @@ RUN bash -c ' \
 
 RUN bash -c ' \
     echo "=== Step 6: Install openclaw ===" && \
-    for attempt in 1 2 3; do \
+    npm config set registry https://registry.npmmirror.com && \
+    for attempt in 1 2 3 4 5; do \
         set +e; \
-        npm install -g openclaw@2026.2.9 --registry=https://registry.npmmirror.com && break; \
-        sleep 15; \
-    done && \
+        npm install -g openclaw@2026.2.9 --loglevel=error --prefer-offline 2>&1; \
+        result=$?; \
+        if [ $result -eq 0 ] || [ -n "$(which openclaw 2>/dev/null)" ]; then \
+            echo "openclaw installed successfully"; \
+            break; \
+        fi; \
+        echo "Attempt $attempt failed, retrying..."; \
+        sleep 30; \
+    done; \
     echo "=== Step 7: Verify openclaw ===" && \
     which openclaw || (echo "ERROR: openclaw not found!"; exit 1) && \
     echo "=== openclaw install complete ===" \

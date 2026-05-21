@@ -4,7 +4,21 @@ RUN sed -i 's/deb.debian.org/mirrors.aliyun.com/g' /etc/apt/sources.list.d/debia
     apt-get update && apt-get install -y --no-install-recommends ca-certificates sudo curl git coreutils && \
     rm -rf /var/lib/apt/lists/*
 
-RUN npm install -g openclaw@2026.2.9 --registry=https://registry.npmmirror.com
+RUN bash -c ' \
+    npm config set registry https://registry.npmmirror.com && \
+    for attempt in 1 2 3 4 5; do \
+        set +e; \
+        npm install -g openclaw@2026.2.9 --loglevel=error --prefer-offline 2>&1; \
+        result=$?; \
+        if [ $result -eq 0 ] || [ -n "$(which openclaw 2>/dev/null)" ]; then \
+            echo "openclaw installed successfully"; \
+            break; \
+        fi; \
+        echo "Attempt $attempt failed, retrying..."; \
+        sleep 30; \
+    done; \
+    which openclaw || (echo "ERROR: openclaw not found!"; exit 1) \
+'
 
 RUN useradd -m -s /bin/bash agent \
     && echo "agent ALL=(ALL) NOPASSWD:ALL" > /etc/sudoers.d/agent \
