@@ -127,17 +127,26 @@ def create_app(docker_client=None):
 
     def ollama_stream_request(path, payload=None, timeout=60 * 60):
         data = None
-        headers = {"Content-Type": "application/json", "Accept": "application/x-ndjson"}
+        headers = {"Content-Type": "application/json"}
         if payload is not None:
             data = json.dumps(payload).encode("utf-8")
         errors = []
         for base_url in ollama_base_urls():
             try:
                 req = urllib.request.Request(f"{base_url}{path}", data=data, headers=headers)
+                req.add_header("Accept", "application/json")
                 with urllib.request.urlopen(req, timeout=timeout) as resp:
+                    content_type = resp.headers.get("Content-Type", "")
                     for line in resp:
-                        if line:
+                        line = line.strip()
+                        if not line:
+                            continue
+                        if line.startswith(b"data:"):
+                            line = line[5:].strip()
+                        try:
                             yield json.loads(line.decode("utf-8"))
+                        except json.JSONDecodeError:
+                            pass
                 return
             except Exception as e:
                 errors.append(f"{base_url}: {e}")
@@ -2041,8 +2050,13 @@ sed -e 's/\x1b\[[0-?]*[ -\/]*[@-~]//g' "$out_file" | tail -120 >> "{log_path}"
           }}
         }} catch (e) {{
           console.error("Check pull status error:", e);
+          downloadDetails.textContent = "检查状态失败: " + e.message;
+          setTimeout(checkPullStatus, 2000);
         }}
       }}
+
+      // 初始化时立即检查状态
+      checkPullStatus();
 
       document.getElementById("deployModelBtn").onclick = deployModel;
       document.getElementById("pullModelBtn").onclick = pullModel;
