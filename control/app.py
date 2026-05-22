@@ -35,6 +35,7 @@ MANAGED_LABEL_VALUE = "true"
 # Used in create_agent (line 127, 144) and validation to map UI type to image/config directory.
 AGENT_SPECS = {
     "openclaw@2026.2.9": {"image": "ollama-claw-agent-openclaw:latest", "config_subdir": "openclaw"},
+    "claude@latest": {"image": "ollama-claw-agent-claude:latest", "config_subdir": "claude"},
 }
 # Used in API handlers (line 259, 300, 310) as default line count shown in each card.
 DEFAULT_TAIL_LINES = 200

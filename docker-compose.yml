@@ -81,5 +81,13 @@ services:
     container_name: ollama-claw-agent-openclaw-template
     command: ["sleep", "infinity"]
 
+  agent-image-claude:
+    build:
+      context: ./agents/agent-claude
+      dockerfile: Dockerfile
+    image: ollama-claw-agent-claude:latest
+    container_name: ollama-claw-agent-claude-template
+    command: ["sleep", "infinity"]
+
 volumes:
   ollama-data:
