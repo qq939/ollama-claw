@@ -1749,6 +1749,15 @@ sed -e 's/\x1b\[[0-?]*[ -\/]*[@-~]//g' "$out_file" | tail -120 >> "{log_path}"
                 <span id="currentModel" style="color: #3AE374; font-weight: 600;">加载中...</span>
                 <span id="modelStatus" class="model-status"></span>
               </div>
+              <div id="downloadProgressContainer" style="display: none; margin: 10px 0; padding: 10px; background: #1a1a2e; border-radius: 8px;">
+                <div style="margin-bottom: 5px; color: #fff; font-size: 12px;">
+                  <span id="downloadStatus">准备下载...</span>
+                </div>
+                <div style="background: #333; border-radius: 4px; height: 20px; overflow: hidden;">
+                  <div id="downloadProgressBar" style="background: linear-gradient(90deg, #3AE374, #00D9FF); height: 100%; width: 0%; transition: width 0.3s ease; border-radius: 4px;"></div>
+                </div>
+                <div id="downloadDetails" style="margin-top: 5px; color: #888; font-size: 11px;"></div>
+              </div>
               <div class="model-row">
                 <input id="modelName" placeholder="输入模型名称（如 qwen2.5:0.5b）" style="min-width: 240px;" />
                 <button id="deployModelBtn" style="background: #3AE374; color: #000;">提交并部署</button>
@@ -1934,10 +1943,21 @@ sed -e 's/\x1b\[[0-?]*[ -\/]*[@-~]//g' "$out_file" | tail -120 >> "{log_path}"
         }}
         const status = document.getElementById("modelStatus");
         const pullLogs = document.getElementById("pullLogs");
+        const progressContainer = document.getElementById("downloadProgressContainer");
+        const progressBar = document.getElementById("downloadProgressBar");
+        const downloadStatus = document.getElementById("downloadStatus");
+        const downloadDetails = document.getElementById("downloadDetails");
+        
         status.textContent = "下载中...";
         status.className = "model-status pulling";
         pullLogs.style.display = "block";
         pullLogs.textContent = `开始下载模型: ${{modelName}}\n`;
+        
+        progressContainer.style.display = "block";
+        progressBar.style.width = "0%";
+        downloadStatus.textContent = `正在下载: ${{modelName}}`;
+        downloadDetails.textContent = "初始化中...";
+        
         try {{
           const res = await fetch("/api/ollama/models/pull", {{
             method: "POST",
@@ -1949,16 +1969,23 @@ sed -e 's/\x1b\[[0-?]*[ -\/]*[@-~]//g' "$out_file" | tail -120 >> "{log_path}"
             status.textContent = "错误: " + (data.error || "未知错误");
             status.className = "model-status error";
             pullLogs.textContent += "错误: " + (data.error || "未知错误") + "\\n";
+            downloadStatus.textContent = "下载失败";
+            progressBar.style.background = "#FF4D4D";
+            downloadDetails.textContent = data.error || "未知错误";
             return;
           }}
           pullLogs.textContent += data.message + "\\n";
-          pullLogs.textContent += "正在后台下载，请查看 Ollama 容器日志...\\n";
           status.textContent = "下载已启动";
-          setTimeout(checkPullStatus, 5000);
+          downloadStatus.textContent = `正在下载: ${{modelName}}`;
+          downloadDetails.textContent = "正在获取进度...";
+          setTimeout(checkPullStatus, 1000);
         }} catch (e) {{
           status.textContent = "错误: " + e.message;
           status.className = "model-status error";
           pullLogs.textContent += "错误: " + e.message + "\\n";
+          downloadStatus.textContent = "下载失败";
+          progressBar.style.background = "#FF4D4D";
+          downloadDetails.textContent = e.message;
         }}
       }}
 
@@ -1968,6 +1995,11 @@ sed -e 's/\x1b\[[0-?]*[ -\/]*[@-~]//g' "$out_file" | tail -120 >> "{log_path}"
           const data = await res.json();
           const status = document.getElementById("modelStatus");
           const pullLogs = document.getElementById("pullLogs");
+          const progressBar = document.getElementById("downloadProgressBar");
+          const downloadStatus = document.getElementById("downloadStatus");
+          const downloadDetails = document.getElementById("downloadDetails");
+          const progressContainer = document.getElementById("downloadProgressContainer");
+          
           if (data.pulling) {{
             const jobs = data.jobs || {{}};
             const jobKeys = Object.keys(jobs);
@@ -1979,19 +2011,28 @@ sed -e 's/\x1b\[[0-?]*[ -\/]*[@-~]//g' "$out_file" | tail -120 >> "{log_path}"
               }}
               if (job.progress !== undefined) {{
                 statusText += " (" + Math.round(job.progress) + "%)";
+                progressBar.style.width = Math.round(job.progress) + "%";
               }}
               status.textContent = statusText;
+              downloadStatus.textContent = statusText;
+              downloadDetails.textContent = job.status_message || "下载中";
               if (pullLogs) {{
                 pullLogs.textContent = (job.status_message || "下载中") + "\\n";
               }}
             }} else {{
               status.textContent = "下载中...";
+              downloadStatus.textContent = "下载中...";
             }}
             status.className = "model-status pulling";
-            setTimeout(checkPullStatus, 2000);
+            setTimeout(checkPullStatus, 1000);
           }} else {{
             status.textContent = "✓ 下载完成";
             status.className = "model-status";
+            downloadStatus.textContent = "✓ 下载完成";
+            progressBar.style.width = "100%";
+            progressBar.style.background = "linear-gradient(90deg, #3AE374, #00D9FF)";
+            downloadDetails.textContent = "模型下载完成";
+            progressContainer.style.display = "none";
             if (pullLogs) {{
               pullLogs.textContent = "✓ 下载完成\\n";
             }}
