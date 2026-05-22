@@ -41,7 +41,7 @@ RUN bash -c ' \
         set +e; \
         npm install -g @anthropic-ai/claude-code@latest --loglevel=error --prefer-offline 2>&1; \
         result=$?; \
-        if [ $result -eq 0 ] || [ -n "$(which claude 2>/dev/null)" ] || [ -n "$(which claude-code 2>/dev/null)" ]; then \
+        if [ $result -eq 0 ] || [ -n "$(which claude 2>/dev/null)" ]; then \
             echo "claude installed successfully"; \
             break; \
         fi; \
@@ -49,18 +49,18 @@ RUN bash -c ' \
         sleep 30; \
     done; \
     echo "=== Step 7: Verify Claude CLI ===" && \
-    (which claude || which claude-code) || (echo "ERROR: claude not found!"; exit 1) && \
+    which claude || (echo "ERROR: claude not found!"; exit 1) && \
     echo "=== Claude CLI install complete ===" \
 '
 
 USER agent
-WORKDIR /home/agent/.claude/workspace/project
+WORKDIR /home/agent
 EXPOSE 8082
 
 CMD ["/bin/sh", "-lc", " \
     mkdir -p \"$HOME/.claude\"; \
     if [ -d /agent-config ]; then cp -R -f /agent-config/. \"$HOME/.claude/\"; fi; \
-    mkdir -p /home/agent/.claude/workspace/project/logs; \
+    mkdir -p \"$HOME/.claude/workspace/project/logs\"; \
     /usr/sbin/sshd; \
     node -e ' \
         const fs=require(\"fs\"); \
@@ -70,7 +70,7 @@ CMD ["/bin/sh", "-lc", " \
         if(fs.existsSync(p)){ \
             const j=JSON.parse(fs.readFileSync(p,\"utf8\")); \
             if(j.claudeCode && j.claudeCode.agent){ \
-                j.claudeCode.agent.workspace=\"/home/agent/.claude/workspace/project\"; \
+                j.claudeCode.agent.workspace=process.env.HOME+\"/.claude/workspace/project\"; \
             } \
             j.gateway = j.gateway || {}; \
             j.gateway.mode = \"remote\"; \
@@ -86,8 +86,9 @@ CMD ["/bin/sh", "-lc", " \
             try { fs.chmodSync(p, 0o600); } catch(e) {} \
         } \
     '; \
-    if [ -f /home/agent/.claude/workspace/project/start.sh ] && [ -s /home/agent/.claude/workspace/project/start.sh ]; then \
-        chmod +x /home/agent/.claude/workspace/project/start.sh; \
-        nohup bash /home/agent/.claude/workspace/project/start.sh >> /home/agent/.claude/workspace/project/logs/start.log 2>&1 & \
+    cd \"$HOME/.claude/workspace/project\"; \
+    if [ -f start.sh ] && [ -s start.sh ]; then \
+        chmod +x start.sh; \
+        nohup bash start.sh >> \"$HOME/.claude/workspace/project/logs/start.log\" 2>&1 & \
     fi; \
-    exec claude-code run --url \"ws://$OPENCLAW_GATEWAY_HOST:$OPENCLAW_GATEWAY_PORT\" --token \"$OPENCLAW_GATEWAY_TOKEN\""]
+    exec claude run --url \"ws://$OPENCLAW_GATEWAY_HOST:$OPENCLAW_GATEWAY_PORT\" --token \"$OPENCLAW_GATEWAY_TOKEN\""]
