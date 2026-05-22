@@ -1878,11 +1878,12 @@ sed -e 's/\x1b\[[0-?]*[ -\/]*[@-~]//g' "$out_file" | tail -120 >> "{log_path}"
       }}
 
       async function deployModel() {{
-        const modelName = document.getElementById("modelName").value.trim();
-        if (!modelName) {{
-          alert("请输入模型名称");
+        const selectedModel = document.querySelector(".model-item.selected");
+        if (!selectedModel) {{
+          alert("请从列表中选择模型");
           return;
         }}
+        const modelName = selectedModel.dataset.model;
         const status = document.getElementById("modelStatus");
         const pullLogs = document.getElementById("pullLogs");
         status.textContent = "提交中...";
