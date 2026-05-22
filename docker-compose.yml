@@ -89,5 +89,13 @@ services:
     container_name: ollama-claw-agent-claude-template
     command: ["sleep", "infinity"]
 
+  agent-image-hermes:
+    build:
+      context: ./agents/agent-hermes
+      dockerfile: Dockerfile
+    image: ollama-claw-agent-hermes:latest
+    container_name: ollama-claw-agent-hermes-template
+    command: ["sleep", "infinity"]
+
 volumes:
   ollama-data:

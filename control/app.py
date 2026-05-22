@@ -36,7 +36,17 @@ MANAGED_LABEL_VALUE = "true"
 AGENT_SPECS = {
     "openclaw@2026.2.9": {"image": "ollama-claw-agent-openclaw:latest", "config_subdir": "openclaw"},
     "claude@latest": {"image": "ollama-claw-agent-claude:latest", "config_subdir": "claude"},
+    "hermes@latest": {"image": "ollama-claw-agent-hermes:latest", "config_subdir": "hermes"},
 }
+AGENT_PATHS = {
+    "openclaw@2026.2.9": {"project_path": "/home/agent/.openclaw/workspace/project", "sessions_path": "/home/agent/.openclaw/projects", "rules_path": "/home/agent/.openclaw/workspace/config-rules", "config_file": "openclaw.json"},
+    "claude@latest": {"project_path": "/home/agent/.claude/workspace/project", "sessions_path": "/home/agent/.claude/projects", "rules_path": "/home/agent/.claude/workspace/config-rules", "config_file": "openclaw.json"},
+    "hermes@latest": {"project_path": "/home/agent/.hermes/workspace/project", "sessions_path": "/home/agent/.hermes/projects", "rules_path": "/home/agent/.hermes/workspace/config-rules", "config_file": "openclaw.json"},
+}
+
+def get_agent_paths(agent_type):
+    return AGENT_PATHS.get(agent_type, AGENT_PATHS["openclaw@2026.2.9"])
+
 # Used in API handlers (line 259, 300, 310) as default line count shown in each card.
 DEFAULT_TAIL_LINES = 200
 # Used in _safe_name_part (line 92) to sanitize user-provided agent names.
