@@ -54,41 +54,16 @@ RUN bash -c ' \
 '
 
 USER agent
-WORKDIR /home/agent
+WORKDIR /home/agent/.claude/workspace/project
 EXPOSE 8082
 
 CMD ["/bin/sh", "-lc", " \
     mkdir -p \"$HOME/.claude\"; \
     if [ -d /agent-config ]; then cp -R -f /agent-config/. \"$HOME/.claude/\"; fi; \
-    mkdir -p \"$HOME/.claude/workspace/project/logs\"; \
+    mkdir -p /home/agent/.claude/workspace/project/logs; \
     /usr/sbin/sshd; \
-    node -e ' \
-        const fs=require(\"fs\"); \
-        const gh=process.env.OPENCLAW_GATEWAY_HOST||\"172.30.0.10\"; \
-        const gp=process.env.OPENCLAW_GATEWAY_PORT||\"18790\"; \
-        const p=process.env.HOME+\"/.claude/settings.json\"; \
-        if(fs.existsSync(p)){ \
-            const j=JSON.parse(fs.readFileSync(p,\"utf8\")); \
-            if(j.claudeCode && j.claudeCode.agent){ \
-                j.claudeCode.agent.workspace=process.env.HOME+\"/.claude/workspace/project\"; \
-            } \
-            j.gateway = j.gateway || {}; \
-            j.gateway.mode = \"remote\"; \
-            j.gateway.port = 18790; \
-            j.gateway.auth = j.gateway.auth || {}; \
-            j.gateway.remote = j.gateway.remote || {}; \
-            j.gateway.remote.url = \"ws://\" + gh + \":\" + gp; \
-            if(j.gateway.auth && j.gateway.auth.token){ \
-                j.gateway.remote.token = j.gateway.auth.token; \
-            } \
-            delete j.gateway.bind; \
-            fs.writeFileSync(p, JSON.stringify(j, null, 2)); \
-            try { fs.chmodSync(p, 0o600); } catch(e) {} \
-        } \
-    '; \
-    cd \"$HOME/.claude/workspace/project\"; \
-    if [ -f start.sh ] && [ -s start.sh ]; then \
-        chmod +x start.sh; \
-        nohup bash start.sh >> \"$HOME/.claude/workspace/project/logs/start.log\" 2>&1 & \
+    if [ -f /home/agent/.claude/workspace/project/start.sh ] && [ -s /home/agent/.claude/workspace/project/start.sh ]; then \
+        chmod +x /home/agent/.claude/workspace/project/start.sh; \
+        nohup bash /home/agent/.claude/workspace/project/start.sh >> /home/agent/.claude/workspace/project/logs/start.log 2>&1 & \
     fi; \
-    exec claude run --url \"ws://$OPENCLAW_GATEWAY_HOST:$OPENCLAW_GATEWAY_PORT\" --token \"$OPENCLAW_GATEWAY_TOKEN\""]
+    exec claude"]
