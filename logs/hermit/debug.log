@@ -5,3 +5,17 @@ cmd: cd /home/agent/.openclaw/workspace/project && git -c safe.directory=* rev-p
 exit_code: 128
 output:
 fatal: Needed a single revision
+
+=== GIT COMMITS DEBUG ===
+container: ollama-claw-agent-claude-template
+cmd: cd /home/agent/.openclaw/workspace/project && git -c safe.directory=* rev-parse --short HEAD && git -c safe.directory=* log --format="%h %ad %s" --date=short -20
+exit_code: 2
+output:
+/bin/sh: 1: cd: can't cd to /home/agent/.openclaw/workspace/project
+
+=== GIT COMMITS DEBUG ===
+container: 18081-djsfo
+cmd: cd /home/agent/.openclaw/workspace/project && git -c safe.directory=* rev-parse --short HEAD && git -c safe.directory=* log --format="%h %ad %s" --date=short -20
+exit_code: 128
+output:
+fatal: Needed a single revision
