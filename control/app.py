@@ -22,7 +22,7 @@ CONTROL_BASE_PORT = int(os.environ.get("CONTROL_BASE_PORT", 18080))
 # Used in find_next_port (line 76) as the first generated agent host port.
 START_HOST_PORT = CONTROL_BASE_PORT + 1
 # Used in find_next_port (line 76) as the upper bound for generated host ports.
-END_HOST_PORT = 18999
+END_HOST_PORT = CONTROL_BASE_PORT + 999
 # Used in create_agent (line 123) and API responses to enforce fixed in-container service port.
 SERVICE_PORT = 8082
 PROJECT_PATH = "/home/agent/.openclaw/workspace/project"
