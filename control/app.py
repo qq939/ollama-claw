@@ -17,8 +17,10 @@ from flask import Flask, jsonify, make_response, request, send_file
 from flask_sock import Sock
 
 # GLOBAL PARAMETERS
+# Control panel base port - all other ports are relative to this
+CONTROL_BASE_PORT = int(os.environ.get("CONTROL_BASE_PORT", 18080))
 # Used in find_next_port (line 76) as the first generated agent host port.
-START_HOST_PORT = 18081
+START_HOST_PORT = CONTROL_BASE_PORT + 1
 # Used in find_next_port (line 76) as the upper bound for generated host ports.
 END_HOST_PORT = 18999
 # Used in create_agent (line 123) and API responses to enforce fixed in-container service port.
@@ -190,7 +192,8 @@ def create_app(docker_client=None):
 
     def display_containers():
         items = []
-        excluded = {"control-18080", "openclaw-gateway", "ollama", "ollama-claw-agent-image-openclaw-1"}
+        control_name = f"control-{CONTROL_BASE_PORT}"
+        excluded = {control_name, "openclaw-gateway", "ollama", "ollama-claw-agent-image-openclaw-1"}
         for c in all_containers():
             if is_managed(c):
                 items.append(c)
@@ -1545,7 +1548,7 @@ sed -e 's/\x1b\[[0-?]*[ -\/]*[@-~]//g' "$out_file" | tail -120 >> "{log_path}"
   <head>
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
-    <title>Hermit Control 18080</title>
+    <title>Hermit Control {CONTROL_BASE_PORT}</title>
     <style>
       :root {{
         --bg: #070A10;
@@ -1758,7 +1761,7 @@ sed -e 's/\x1b\[[0-?]*[ -\/]*[@-~]//g' "$out_file" | tail -120 >> "{log_path}"
         <div style="display:flex;align-items:center;gap:20px;margin-bottom:12px;">
           <h1 style="margin:0;">OLLAMA CLAW</h1>
         </div>
-        <div class="sub">创建类型：openclaw@2026.2.9；端口从 18081 递增，容器名格式：端口号-容器名称。</div>
+        <div class="sub">创建类型：openclaw@2026.2.9；端口从 {CONTROL_BASE_PORT + 1} 递增，容器名格式：端口号-容器名称。</div>
         <div class="panel">
           <div class="row">
             <select id="agentType"></select>
@@ -2331,7 +2334,7 @@ sed -e 's/\x1b\[[0-?]*[ -\/]*[@-~]//g' "$out_file" | tail -120 >> "{log_path}"
         }};
         if (!managed) {{
           cmdInput.disabled = true;
-          cmdInput.placeholder = "该容器非18080创建（compose成员），默认只读显示";
+          cmdInput.placeholder = "该容器非{CONTROL_BASE_PORT}创建（compose成员），默认只读显示";
           div.querySelector('button[data-action="recreate"]').disabled = true;
         }}
         return div;
