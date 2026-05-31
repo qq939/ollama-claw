@@ -1,3 +1,4 @@
 ollama-data/
 workspaces/
 logs/
+.env
