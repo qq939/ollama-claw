@@ -45,6 +45,7 @@ AGENT_PATHS = {
     "claude@latest": {"project_path": "/home/agent/.claude/workspace/project", "sessions_path": "/home/agent/.claude/projects", "rules_path": "/home/agent/.claude/workspace/config-rules", "config_file": "openclaw.json"},
     "hermes@latest": {"project_path": "/home/agent/.hermes/workspace/project", "sessions_path": "/home/agent/.hermes/projects", "rules_path": "/home/agent/.hermes/workspace/config-rules", "config_file": "openclaw.json"},
 }
+OPENCLAW_TOOL_UNSUPPORTED_MODEL_PREFIXES = ("deepseek-r1",)
 
 def get_agent_paths(agent_type):
     return AGENT_PATHS.get(agent_type, AGENT_PATHS["openclaw@2026.2.9"])
@@ -294,14 +295,23 @@ def create_app(docker_client=None):
         raise RuntimeError("No available host port in configured range")
 
     def project_path_for_agent_type(agent_type):
-        return PROJECT_PATH
+        return get_agent_paths(agent_type)["project_path"]
 
     def log_path_for_agent_type(agent_type):
-        return LOG_PATH
+        return f"{project_path_for_agent_type(agent_type)}/logs/agent_tui.log"
+
+    def logs_path_for_agent_type(agent_type):
+        return f"{project_path_for_agent_type(agent_type)}/logs"
+
+    def sessions_path_for_agent_type(agent_type):
+        return get_agent_paths(agent_type)["sessions_path"]
+
+    def rules_path_for_agent_type(agent_type):
+        return get_agent_paths(agent_type)["rules_path"]
 
     def openclaw_env(spec):
         env_vars = {
-            "OPENCLAW_GATEWAY_HOST": os.environ.get("OPENCLAW_GATEWAY_HOST", "172.30.0.10"),
+            "OPENCLAW_GATEWAY_HOST": os.environ.get("OPENCLAW_GATEWAY_HOST", "172.31.0.10"),
             "OPENCLAW_GATEWAY_PORT": os.environ.get("OPENCLAW_GATEWAY_PORT", "18790"),
         }
         config_root = app.config["CONFIG_ROOT"]
@@ -331,7 +341,11 @@ def create_app(docker_client=None):
                 raise ValueError("Only ollama models are supported in this deployment")
             if not ollama_model.strip():
                 raise ValueError("Ollama model name is required")
+            if ollama_model.strip().startswith(OPENCLAW_TOOL_UNSUPPORTED_MODEL_PREFIXES):
+                raise ValueError(f"{ollama_model.strip()} does not support tools required by OpenClaw. Please choose a tools-capable model such as qwen2.5 or qwen3.")
             return f"ollama/{ollama_model.strip()}", ollama_model.strip()
+        if model.startswith(OPENCLAW_TOOL_UNSUPPORTED_MODEL_PREFIXES):
+            raise ValueError(f"{model} does not support tools required by OpenClaw. Please choose a tools-capable model such as qwen2.5 or qwen3.")
         return f"ollama/{model}", model
 
     def upsert_openclaw_ollama_model(model_name):
@@ -378,7 +392,7 @@ def create_app(docker_client=None):
         if token:
             gateway["auth"]["token"] = token
         gateway.setdefault("remote", {})
-        gateway["remote"]["url"] = f"ws://{os.environ.get('OPENCLAW_GATEWAY_HOST', '172.30.0.10')}:{os.environ.get('OPENCLAW_GATEWAY_PORT', '18790')}"
+        gateway["remote"]["url"] = f"ws://{os.environ.get('OPENCLAW_GATEWAY_HOST', '172.31.0.10')}:{os.environ.get('OPENCLAW_GATEWAY_PORT', '18790')}"
         if token:
             gateway["remote"]["token"] = token
 
@@ -442,7 +456,7 @@ def create_app(docker_client=None):
             try:
                 payload = recreate_agent(c.name)
                 add_frpc_rule(payload["host_port"])
-                scp_rules_to_container(payload["container_name"], PROJECT_PATH)
+                scp_rules_to_container(payload["container_name"], project_path_for_agent_type(payload["agent_type"]))
                 recreated.append(payload)
                 if not gateway_token:
                     gateway_token = openclaw_env(AGENT_SPECS[payload["agent_type"]]).get("OPENCLAW_GATEWAY_TOKEN", "")
@@ -481,7 +495,7 @@ const paired = readJson(pairedPath);
 const now = Date.now();
 let count = 0;
 for (const [requestId, req] of Object.entries(pending)) {
-  if (!req || !["gateway-client", "cli"].includes(req.clientId)) continue;
+  if (!req || !req.deviceId || !req.publicKey) continue;
   const role = req.role || "operator";
   const scopes = Array.isArray(req.scopes) && req.scopes.length ? [...req.scopes].sort() : ["operator.admin"];
   const existing = paired[req.deviceId] || {};
@@ -559,12 +573,34 @@ console.log(count);
         
         msg_to_send = message or INITIAL_MESSAGE
         msg_b64 = base64.b64encode(msg_to_send.encode("utf-8")).decode("ascii")
-        runner_path = f"{project_path}/.openclaw-send-message.sh"
-        log_path = LOG_PATH
-        runner = f"""#!/bin/sh
+        log_path = log_path_for_agent_type(agent_type)
+        if agent_type in ("claude@latest", "hermes@latest"):
+            runner_path = f"{project_path}/.agent-send-message.sh"
+            cli = "claude" if agent_type == "claude@latest" else "hermes"
+            runner = f"""#!/bin/sh
 set -eu
-mkdir -p "{LOGS_PATH}"
-node -e 'const fs=require("fs"); const p=process.env.HOME+"/.{agent_dir}/"+"{config_file}"; if(fs.existsSync(p)){{const j=JSON.parse(fs.readFileSync(p,"utf8")); j.gateway=j.gateway={{}}; j.gateway.mode="remote"; j.gateway.remote=j.gateway.remote={{}}; j.gateway.remote.url="ws://"+(process.env.OPENCLAW_GATEWAY_HOST||"172.30.0.10")+":"+(process.env.OPENCLAW_GATEWAY_PORT||"18790"); if(process.env.OPENCLAW_GATEWAY_TOKEN) j.gateway.remote.token=process.env.OPENCLAW_GATEWAY_TOKEN; delete j.gateway.bind; fs.writeFileSync(p,JSON.stringify(j,null,2)); fs.chmodSync(p,0o600);}}'
+mkdir -p "{logs_path_for_agent_type(agent_type)}"
+out_file="$(mktemp /tmp/{cli}-output.XXXXXX)"
+trap 'rm -f "$out_file"' EXIT
+printf '\\n[{agent_type}] %s\\n' "$(date '+%Y-%m-%d %H:%M:%S')" >> "{log_path}"
+if [ -f "{project_path}/run_claude.js" ]; then
+  if timeout 120 env CLAUDE_MSG="{msg_b64}" node "{project_path}/run_claude.js" > "$out_file" 2>&1; then
+    printf '[{agent_type}-exit] 0\\n' >> "{log_path}"
+  else
+    code="$?"
+    printf '[{agent_type}-exit] %s\\n' "$code" >> "{log_path}"
+  fi
+else
+  printf '[{agent_type}-exit] 127\\nmissing runner: {project_path}/run_claude.js\\n' >> "{log_path}"
+fi
+sed -e 's/\\x1b\\[[0-?]*[ -\\/]*[@-~]//g' "$out_file" | tail -120 >> "{log_path}"
+"""
+        else:
+            runner_path = f"{project_path}/.openclaw-send-message.sh"
+            runner = f"""#!/bin/sh
+set -eu
+mkdir -p "{logs_path_for_agent_type(agent_type)}"
+node -e 'const fs=require("fs"); const p=process.env.HOME+"/.{agent_dir}/"+"{config_file}"; if(fs.existsSync(p)){{const j=JSON.parse(fs.readFileSync(p,"utf8")); j.gateway=j.gateway={{}}; j.gateway.mode="remote"; j.gateway.remote=j.gateway.remote={{}}; j.gateway.remote.url="ws://"+(process.env.OPENCLAW_GATEWAY_HOST||"172.31.0.10")+":"+(process.env.OPENCLAW_GATEWAY_PORT||"18790"); if(process.env.OPENCLAW_GATEWAY_TOKEN) j.gateway.remote.token=process.env.OPENCLAW_GATEWAY_TOKEN; delete j.gateway.bind; fs.writeFileSync(p,JSON.stringify(j,null,2)); fs.chmodSync(p,0o600);}}'
 msg_file="$(mktemp /tmp/openclaw-message.XXXXXX)"
 out_file="$(mktemp /tmp/openclaw-output.XXXXXX)"
 trap 'rm -f "$msg_file" "$out_file"' EXIT
@@ -576,7 +612,7 @@ else
   code="$?"
   printf '[{agent_type}-exit] %s\\n' "$code" >> "{log_path}"
 fi
-sed -e 's/\x1b\[[0-?]*[ -\/]*[@-~]//g' "$out_file" | tail -120 >> "{log_path}"
+sed -e 's/\\x1b\\[[0-?]*[ -\\/]*[@-~]//g' "$out_file" | tail -120 >> "{log_path}"
 """
         runner_b64 = base64.b64encode(runner.encode("utf-8")).decode("ascii")
         write_cmd = f"printf '%s' '{runner_b64}' | base64 -d > '{runner_path}' && chmod +x '{runner_path}'"
@@ -595,9 +631,13 @@ sed -e 's/\x1b\[[0-?]*[ -\/]*[@-~]//g' "$out_file" | tail -120 >> "{log_path}"
         return result
 
     def append_user_log(container, message):
+        labels = ((getattr(container, "attrs", {}) or {}).get("Config", {}) or {}).get("Labels", {}) or (getattr(container, "labels", {}) or {})
+        agent_type = labels.get("hermit.agent_type") or "openclaw@2026.2.9"
+        log_path = log_path_for_agent_type(agent_type)
+        logs_path = logs_path_for_agent_type(agent_type)
         ts = datetime.now(timezone(timedelta(hours=8))).strftime("%Y-%m-%d %H:%M:%S")
         safe = (message or INITIAL_MESSAGE).replace("'", "'\"'\"'")
-        container.exec_run(["/bin/sh", "-c", f"mkdir -p '{LOGS_PATH}' && echo '[{ts}] $ {safe}' >> '{LOG_PATH}'"], user=AGENT_RUNTIME_USER)
+        container.exec_run(["/bin/sh", "-c", f"mkdir -p '{logs_path}' && echo '[{ts}] $ {safe}' >> '{log_path}'"], user=AGENT_RUNTIME_USER)
 
     def clean_log_text(text):
         cleaned = ANSI_ESCAPE_PATTERN.sub("", text or "")
@@ -698,13 +738,16 @@ sed -e 's/\x1b\[[0-?]*[ -\/]*[@-~]//g' "$out_file" | tail -120 >> "{log_path}"
         host_workspaces_root = app.config["HOST_WORKSPACES_ROOT"]
         host_logs_root = app.config.get("HOST_LOGS_ROOT") or os.path.join(os.path.dirname(host_workspaces_root), "logs")
         ensure_host_agent_dirs(container_name)
-        log_bind = LOGS_PATH
+        project_path = project_path_for_agent_type(agent_type)
+        sessions_path = sessions_path_for_agent_type(agent_type)
+        logs_path = logs_path_for_agent_type(agent_type)
+        rules_path = rules_path_for_agent_type(agent_type)
         volumes = {
             f"{host_config_root}/{spec['config_subdir']}": {"bind": "/agent-config", "mode": "ro"},
-            f"{host_workspaces_root}/{container_name}": {"bind": PROJECT_PATH, "mode": "rw"},
-            f"{host_workspaces_root}/{container_name}/sessions": {"bind": SESSIONS_PATH, "mode": "rw"},
-            f"{host_logs_root}/{container_name}": {"bind": log_bind, "mode": "rw"},
-            f"{host_config_root}/rules": {"bind": RULES_PATH, "mode": "ro"},
+            f"{host_workspaces_root}/{container_name}": {"bind": project_path, "mode": "rw"},
+            f"{host_workspaces_root}/{container_name}/sessions": {"bind": sessions_path, "mode": "rw"},
+            f"{host_logs_root}/{container_name}": {"bind": logs_path, "mode": "rw"},
+            f"{host_config_root}/rules": {"bind": rules_path, "mode": "ro"},
         }
         log_config = LogConfig(type=LogConfig.types.JSON, config={"max-size": "500m", "max-file": "2"})
 
@@ -734,6 +777,7 @@ sed -e 's/\x1b\[[0-?]*[ -\/]*[@-~]//g' "$out_file" | tail -120 >> "{log_path}"
         if not body.get("skip_initial_message"):
             # 创建容器后发送初始消息
             time.sleep(3)
+            scp_rules_to_container(container.name, project_path)
             auto_pair_openclaw_client(gateway_token)
             user_msg = (body.get("message") or "").strip()
             msg_to_send = user_msg or INITIAL_MESSAGE
@@ -769,13 +813,16 @@ sed -e 's/\x1b\[[0-?]*[ -\/]*[@-~]//g' "$out_file" | tail -120 >> "{log_path}"
         host_workspaces_root = app.config["HOST_WORKSPACES_ROOT"]
         host_logs_root = app.config.get("HOST_LOGS_ROOT") or os.path.join(os.path.dirname(host_workspaces_root), "logs")
         ensure_host_agent_dirs(container_name)
-        log_bind = LOGS_PATH
+        project_path = project_path_for_agent_type(agent_type)
+        sessions_path = sessions_path_for_agent_type(agent_type)
+        logs_path = logs_path_for_agent_type(agent_type)
+        rules_path = rules_path_for_agent_type(agent_type)
         volumes = {
             f"{host_config_root}/{spec['config_subdir']}": {"bind": "/agent-config", "mode": "ro"},
-            f"{host_workspaces_root}/{container_name}": {"bind": PROJECT_PATH, "mode": "rw"},
-            f"{host_workspaces_root}/{container_name}/sessions": {"bind": SESSIONS_PATH, "mode": "rw"},
-            f"{host_logs_root}/{container_name}": {"bind": log_bind, "mode": "rw"},
-            f"{host_config_root}/rules": {"bind": RULES_PATH, "mode": "ro"},
+            f"{host_workspaces_root}/{container_name}": {"bind": project_path, "mode": "rw"},
+            f"{host_workspaces_root}/{container_name}/sessions": {"bind": sessions_path, "mode": "rw"},
+            f"{host_logs_root}/{container_name}": {"bind": logs_path, "mode": "rw"},
+            f"{host_config_root}/rules": {"bind": rules_path, "mode": "ro"},
         }
         log_config = LogConfig(type=LogConfig.types.JSON, config={"max-size": "500m", "max-file": "2"})
         container.remove(force=True)
@@ -1006,7 +1053,7 @@ sed -e 's/\x1b\[[0-?]*[ -\/]*[@-~]//g' "$out_file" | tail -120 >> "{log_path}"
                 return
             labels = ((container.attrs or {}).get("Config", {}) or {}).get("Labels", {}) or {}
             agent_type = labels.get("hermit.agent_type", "")
-            project_path = PROJECT_PATH
+            project_path = project_path_for_agent_type(agent_type)
 
             import paramiko
         except ImportError:
@@ -1101,7 +1148,7 @@ sed -e 's/\x1b\[[0-?]*[ -\/]*[@-~]//g' "$out_file" | tail -120 >> "{log_path}"
             "time": now_iso(),
             "agent_types": list(AGENT_SPECS.keys()),
             "gateway": {
-                "host": os.environ.get("OPENCLAW_GATEWAY_HOST", "172.30.0.10"),
+                "host": os.environ.get("OPENCLAW_GATEWAY_HOST", "172.31.0.10"),
                 "port": os.environ.get("OPENCLAW_GATEWAY_PORT", "18790"),
                 "token_configured": token_configured,
             },
@@ -1125,7 +1172,7 @@ sed -e 's/\x1b\[[0-?]*[ -\/]*[@-~]//g' "$out_file" | tail -120 >> "{log_path}"
         try:
             payload = create_agent(agent_type, name, body)
             add_frpc_rule(payload["host_port"])
-            scp_rules_to_container(payload["container_name"], PROJECT_PATH)
+            scp_rules_to_container(payload["container_name"], project_path_for_agent_type(payload["agent_type"]))
             return jsonify(payload), 201
         except ValueError as e:
             return jsonify({"error": str(e)}), 400
@@ -1377,7 +1424,7 @@ sed -e 's/\x1b\[[0-?]*[ -\/]*[@-~]//g' "$out_file" | tail -120 >> "{log_path}"
             add_frpc_rule(payload["host_port"])
             import time
             time.sleep(8)
-            scp_rules_to_container(payload["container_name"], PROJECT_PATH)
+            scp_rules_to_container(payload["container_name"], project_path_for_agent_type(payload["agent_type"]))
             default_msg = INITIAL_MESSAGE
             try:
                 container_new = docker_client_or_default().containers.get(payload["container_name"])
@@ -1417,7 +1464,7 @@ sed -e 's/\x1b\[[0-?]*[ -\/]*[@-~]//g' "$out_file" | tail -120 >> "{log_path}"
                 agent_type = labels.get("hermit.agent_type", "")
                 payload = recreate_agent(c.name)
                 add_frpc_rule(payload["host_port"])
-                scp_rules_to_container(payload["container_name"], PROJECT_PATH)
+                scp_rules_to_container(payload["container_name"], project_path_for_agent_type(payload["agent_type"]))
                 recreated.append(payload)
             except Exception as e:
                 errors[c.name] = str(e)

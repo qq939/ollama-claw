@@ -64,7 +64,7 @@ CMD ["/bin/sh", "-lc", " \
     /usr/sbin/sshd; \
     node -e ' \
         const fs=require(\"fs\"); \
-        const gh=process.env.OPENCLAW_GATEWAY_HOST||\"172.30.0.10\"; \
+        const gh=process.env.OPENCLAW_GATEWAY_HOST||\"172.31.0.10\"; \
         const gp=process.env.OPENCLAW_GATEWAY_PORT||\"18790\"; \
         const p=process.env.HOME+\"/.openclaw/openclaw.json\"; \
         if(fs.existsSync(p)){ \

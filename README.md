@@ -1,13 +1,13 @@
 # Ollama + OpenClaw 全功能 Docker Compose
 
-基于 hermit-claw 架构开发的容器化 AI Agent 系统，支持通过 API 动态创建和管理 OpenClaw Agent。
+基于 hermit-claw 架构开发的容器化 AI Agent 系统，支持通过 API 动态创建和管理 OpenClaw、Claude、Hermes Agent。其中 Claude 容器尽量沿用 hermit-claw 的启动习惯，OpenClaw 是本项目新增的容器类型。
 
 ## 架构
 
 ```
 ┌─────────────────────────────────────────────────────────────┐
 │                     控制平面 (Control Plane)                  │
-│                   http://localhost:18080                     │
+│              http://localhost:${CONTROL_BASE_PORT:-18080}     │
 │              动态创建/管理 Agent 容器                         │
 ├─────────────────────────────────────────────────────────────┤
 │                                                             │
@@ -17,7 +17,7 @@
 │  │  :11434    │   │  :18789/:18790   │   │  (动态创建)  │  │
 │  └─────────────┘   └─────────────────┘   └──────────────┘  │
 │                                                             │
-│  Network: 172.30.0.0/16                                     │
+│  Network: 172.31.0.0/16                                     │
 └─────────────────────────────────────────────────────────────┘
 ```
 
@@ -27,7 +27,16 @@
 |------|------|------|
 | **ollama** | 11434 | LLM 推理服务 |
 | **openclaw-gateway** | 18789 | OpenClaw 认证网关 |
-| **control-18080** | 18080 | Agent 控制 API |
+| **control-${CONTROL_BASE_PORT:-18080}** | `${CONTROL_BASE_PORT:-18080}` | Agent 控制 API |
+
+默认 `.env` 可把控制面板端口起点改成 20000：
+
+```dotenv
+CONTROL_BASE_PORT=20000
+OPENCLAW_GATEWAY_TOKEN=2ac145e2572b9b2fb44717b520c22588858403a75d4a6ea2
+```
+
+设置后控制面板地址为 `http://localhost:20000`，动态 Agent 端口从 `20001` 开始，最多分配到 `20999`。
 
 ## 快速开始
 
@@ -52,7 +61,7 @@ docker exec openclaw-gateway openclaw models list
 
 ### 3. 创建 Agent
 
-通过 API 创建 OpenClaw Agent：
+通过 API 创建 Agent：
 
 ```bash
 curl -X POST http://localhost:18080/api/agents \
@@ -62,6 +71,14 @@ curl -X POST http://localhost:18080/api/agents \
     "name": "my-agent"
   }'
 ```
+
+可用类型：
+
+| 类型 | 说明 |
+|------|------|
+| `openclaw@2026.2.9` | 本项目新增的 OpenClaw Agent，连接 `openclaw-gateway` 和本地 Ollama |
+| `claude@latest` | Claude Code Agent，容器启动方式参考 hermit-claw：预置 onboarding、复制 rules、通过 `run_claude.js` 接收消息 |
+| `hermes@latest` | Hermes Agent 模板 |
 
 响应示例：
 ```json
@@ -157,6 +174,8 @@ DELETE /api/agents/{container_name}
 - `models.providers.ollama`: Ollama 模型配置
 - `agents.defaults.model.primary`: 默认使用的模型
 
+注意：OpenClaw 会使用工具调用能力，`deepseek-r1:1.5b` 这类不支持 tools 的 Ollama 模型会报 `does not support tools`。默认配置使用 `ollama/qwen2.5:0.5b`，部署模型时请优先选择支持 tools 的 `qwen2.5`、`qwen3` 等模型。
+
 ### 下载模型到 Ollama
 
 ```bash
@@ -174,7 +193,13 @@ exit
 
 ### Agent 配置
 
-Agent 容器会自动从 `config/openclaw/` 目录读取配置。
+Agent 容器会按类型读取配置：
+
+| 类型 | 配置目录 | 容器内工作目录 |
+|------|----------|----------------|
+| `openclaw@2026.2.9` | `config/openclaw/` | `/home/agent/.openclaw/workspace/project` |
+| `claude@latest` | `config/claude/` | `/home/agent/.claude/workspace/project` |
+| `hermes@latest` | `config/hermes/` | `/home/agent/.hermes/workspace/project` |
 
 ## 目录结构
 
@@ -184,7 +209,9 @@ ollama-claw/
 ├── agents/
 │   ├── gateway/                 # OpenClaw Gateway
 │   │   └── Dockerfile
-│   ├── agent-openclaw/          # OpenClaw Agent 模板
+│   ├── agent-openclaw/          # OpenClaw Agent 模板（本项目新增）
+│   ├── agent-claude/            # Claude Agent 模板（参考 hermit-claw）
+│   ├── agent-hermes/            # Hermes Agent 模板
 │   │   └── Dockerfile
 │   └── ollama/                  # Ollama 服务
 │       └── Dockerfile
@@ -194,6 +221,11 @@ ollama-claw/
 │   └── requirements.txt
 ├── config/
 │   ├── openclaw/                # OpenClaw 配置
+│   │   └── openclaw.json
+│   ├── claude/                  # Claude 配置
+│   │   ├── openclaw.json
+│   │   └── settings.json
+│   ├── hermes/                  # Hermes 配置
 │   │   └── openclaw.json
 │   └── rules/                   # Agent 规则文件
 ├── workspaces/                  # Agent 工作目录
@@ -206,8 +238,9 @@ ollama-claw/
 | 变量 | 默认值 | 说明 |
 |------|--------|------|
 | `OPENCLAW_GATEWAY_TOKEN` | `2ac145e2572b9b2fb44717b520c22588858403a75d4a6ea2` | Gateway 认证令牌 |
-| `OPENCLAW_GATEWAY_HOST` | `172.30.0.10` | Gateway 主机地址 |
+| `OPENCLAW_GATEWAY_HOST` | `172.31.0.10` | Gateway 主机地址 |
 | `OPENCLAW_GATEWAY_PORT` | `18790` | Gateway WebSocket 端口 |
+| `CONTROL_BASE_PORT` | `18080` | 控制面板宿主机端口；Agent 端口从该值 + 1 开始 |
 
 ## 故障排查
 
@@ -238,12 +271,13 @@ docker-compose up -d --build
 
 ## 与 hermit-claw 的区别
 
-1. **专注于 OpenClaw**：移除了 claude 和 ollama agent 类型，专注于 OpenClaw Agent
-2. **基于 Ollama**：使用 Ollama 作为 LLM 后端替代 Anthropic API
-3. **简化配置**：移除复杂的 frpc 和 ssh-gateway 依赖
+1. **新增 OpenClaw 容器类型**：`openclaw@2026.2.9` 是本项目新增的 Agent 模板，默认接入本地 Ollama 和 `openclaw-gateway`
+2. **保留 Claude 容器思路**：`claude@latest` 参考 hermit-claw 的 Claude 容器，预置信任/跳过 onboarding，并通过 `run_claude.js` 处理控制面板发送的消息
+3. **动态端口起点**：通过 `.env` 或环境变量设置 `CONTROL_BASE_PORT`，控制面板使用该端口，Agent 从 `CONTROL_BASE_PORT + 1` 递增
+4. **基于 Ollama**：OpenClaw 默认使用 Ollama 作为 LLM 后端，模型需支持工具调用
 
 ## 注意事项
 
 1. Agent 使用资源限制：16GB 内存 + 8GB 共享内存
 2. 日志文件限制：500MB 大小，最多 2 个文件轮转
-3. 端口范围：Agent 分配端口 18081-18999
+3. 端口范围：Agent 分配端口为 `CONTROL_BASE_PORT + 1` 到 `CONTROL_BASE_PORT + 999`，默认是 `18081-19079`；当前 `.env` 示例是 `20001-20999`
