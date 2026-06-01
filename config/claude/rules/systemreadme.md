@@ -106,9 +106,23 @@
 五、服务端口
 ================================================================================
 
-容器内 Web 服务固定暴露端口：8082
+容器内主程序固定暴露端口：8082
 
-你的应用应监听 8082 端口。宿主机通过 18081-19999 之间的端口访问。
+`server.js` 监听 `0.0.0.0:8082`，对外只暴露统一入口 `/ask`。`server.js` 的 `/ask` 必须转发到内部 `ask_server.js` 的 `/ask`，也就是 `http://127.0.0.1:8081/ask`。
+
+`ask_server.js` 监听 `127.0.0.1:8081`，只处理底层 Agent 调用，不直接对宿主机暴露。不要让控制面板或外部调用绕过 `server.js` 直接访问 `8081/ask`。
+
+你写的业务 web app 不要直接占用 8082。默认请监听 `APP_PORT` 或 `3000`，需要对外暴露时由 `server.js` 增加转发。
+
+容器统一 ask 接口：
+
+```bash
+curl -X POST http://localhost:${AGENT_HOST_PORT}/ask \
+  -H "Content-Type: application/json" \
+  -d '{"message":"你好啊"}'
+```
+
+Claude/Hermes/OpenClaw 都使用同一个外部入口 `/ask`。健康检查为 `GET /ask/health`。控制面板也必须通过这个中间层给 Agent 容器发消息。
 
 SSH 服务监听容器内端口 22，通过 host_port - 10000 的端口映射访问。
 

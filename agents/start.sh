@@ -1,6 +1,7 @@
 #!/bin/bash
 set -e
 
+cd "${PROJECT_PATH:-$(pwd)}"
 mkdir -p logs
 
 if [ -f /usr/local/bin/ask_server.js ]; then

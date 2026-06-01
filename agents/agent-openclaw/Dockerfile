@@ -54,6 +54,15 @@ RUN bash -c ' \
 '
 
 USER agent
+ENV AGENT_KIND=openclaw
+ENV PROJECT_PATH=/home/agent/.openclaw/workspace/project
+ENV LOG_PATH=/home/agent/.openclaw/workspace/project/logs/agent_tui.log
+ENV ASK_PORT=8081
+ENV SERVER_PORT=8082
+COPY --chown=501:20 ask_server.js /usr/local/bin/ask_server.js
+COPY --chown=501:20 server.js /usr/local/bin/server.js
+COPY --chown=501:20 start.sh /usr/local/bin/start.sh
+
 WORKDIR /home/agent/.openclaw/workspace/project
 EXPOSE 8082
 
@@ -86,6 +95,8 @@ CMD ["/bin/sh", "-lc", " \
             try { fs.chmodSync(p, 0o600); } catch(e) {} \
         } \
     '; \
+    cp -f /usr/local/bin/start.sh /home/agent/.openclaw/workspace/project/start.sh; \
+    chmod +x /home/agent/.openclaw/workspace/project/start.sh; \
     if [ -f /home/agent/.openclaw/workspace/project/start.sh ] && [ -s /home/agent/.openclaw/workspace/project/start.sh ]; then \
         chmod +x /home/agent/.openclaw/workspace/project/start.sh; \
         nohup bash /home/agent/.openclaw/workspace/project/start.sh >> /home/agent/.openclaw/workspace/project/logs/start.log 2>&1 & \

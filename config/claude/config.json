@@ -16,7 +16,7 @@
         "name": "Ollama",
         "settingsConfig": {
           "env": {
-            "ANTHROPIC_BASE_URL": "http://control-20000:8080/anthropic",
+            "ANTHROPIC_BASE_URL": "http://ollama:11434",
             "ANTHROPIC_AUTH_TOKEN": "ollama",
             "ANTHROPIC_API_KEY": "ollama",
             "ANTHROPIC_MODEL": "qwen2.5:0.5b",
@@ -36,8 +36,8 @@
         "createdAt": 1780302663650,
         "meta": {
           "custom_endpoints": {
-            "http://control-20000:8080/anthropic": {
-              "url": "http://control-20000:8080/anthropic",
+            "http://ollama:11434": {
+              "url": "http://ollama:11434",
               "addedAt": 1780302663650
             }
           }

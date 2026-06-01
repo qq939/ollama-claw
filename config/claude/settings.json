@@ -1,6 +1,6 @@
 {
   "env": {
-    "ANTHROPIC_BASE_URL": "http://control-20000:8080/anthropic",
+    "ANTHROPIC_BASE_URL": "http://ollama:11434",
     "ANTHROPIC_AUTH_TOKEN": "ollama",
     "ANTHROPIC_API_KEY": "ollama",
     "ANTHROPIC_MODEL": "qwen2.5:0.5b",

@@ -57,6 +57,15 @@ RUN bash -c ' \
 ENV CLAUDE_CODE_TRUST_ALL=true
 ENV CLAUDE_CODE_SKIP_ONBOARDING=true
 ENV CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC=1
+ENV AGENT_KIND=claude
+ENV PROJECT_PATH=/home/agent/.claude/workspace/project
+ENV LOG_PATH=/home/agent/.claude/workspace/project/logs/agent_tui.log
+ENV ASK_PORT=8081
+ENV SERVER_PORT=8082
+
+COPY --chown=501:20 ask_server.js /usr/local/bin/ask_server.js
+COPY --chown=501:20 server.js /usr/local/bin/server.js
+COPY --chown=501:20 start.sh /usr/local/bin/start.sh
 
 USER agent
 WORKDIR /home/agent/.claude/workspace/project
@@ -86,6 +95,8 @@ CMD ["/bin/sh", "-lc", " \
             sleep 2; \
         done; \
     fi; \
+    cp -f /usr/local/bin/start.sh /home/agent/.claude/workspace/project/start.sh; \
+    chmod +x /home/agent/.claude/workspace/project/start.sh; \
     if [ -f /home/agent/.claude/workspace/project/start.sh ] && [ -s /home/agent/.claude/workspace/project/start.sh ]; then \
         chmod +x /home/agent/.claude/workspace/project/start.sh; \
         nohup bash /home/agent/.claude/workspace/project/start.sh >> /home/agent/.claude/workspace/project/logs/start.log 2>&1 & \

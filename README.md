@@ -99,7 +99,24 @@ curl -X POST http://localhost:18080/api/agents/18081-my-agent/command \
   -d '{"command": "ls -la /workspace"}'
 ```
 
-### 5. 查看日志
+### 5. 通过容器 Ask 接口提问
+
+每个 Agent 容器都会暴露统一的 `/ask` 接口。宿主机访问时使用控制面板分配的 Agent 端口：
+
+```bash
+curl -X POST http://localhost:18081/ask \
+  -H "Content-Type: application/json" \
+  -d '{"message": "你好啊"}'
+
+# 健康检查
+curl http://localhost:18081/ask/health
+```
+
+容器内部是两层结构：底层 `ask_server.js` 监听 `127.0.0.1:8081/ask`，负责调用 Claude 或 OpenClaw；主程序 `server.js` 监听 `0.0.0.0:8082/ask`，并转发到 `8081/ask`。控制面板的 `/api/agents/{container_name}/send-message` 也会通过这个中间层调用 Agent。
+
+请求体支持 `message`、`prompt` 或 `text` 字段；响应包含 `ok`、`agent`、`target`、`exit_code` 和 `output`。
+
+### 6. 查看日志
 
 ```bash
 # 查看所有 Agent 状态
@@ -112,7 +129,7 @@ curl "http://localhost:18080/api/agents/18081-my-agent/logs/download" -o agent.l
 curl "http://localhost:18080/api/agents/18081-my-agent/logs?tail=50"
 ```
 
-### 6. 删除 Agent
+### 7. 删除 Agent
 
 ```bash
 curl -X DELETE http://localhost:18080/api/agents/18081-my-agent
@@ -153,6 +170,16 @@ POST /api/agents/{container_name}/command
 GET /api/agents/{container_name}/logs?tail=200
 ```
 
+### 容器 Ask 接口
+```
+GET /ask/health
+
+POST /ask
+{
+  "message": "你好啊"
+}
+```
+
 ### 下载日志
 ```
 GET /api/agents/{container_name}/logs/download?tail=500
@@ -178,15 +205,13 @@ DELETE /api/agents/{container_name}
 
 ### Claude + Ollama 配置
 
-Claude 容器使用 `run_claude.js` 调用 Claude Code CLI，不再把 Claude 消息转给 `openclaw` 命令。控制面板会把 `config/claude/settings.json`、`config/claude/config.json` 注入到容器内的 `/home/agent/.claude/`，默认通过本项目内置的 Anthropic 兼容代理访问 Ollama：
+Claude 容器使用 `run_claude.js` 调用 Claude Code CLI，不再把 Claude 消息转给 `openclaw` 命令。控制面板会把 `config/claude/settings.json`、`config/claude/config.json` 注入到容器内的 `/home/agent/.claude/`，默认指向 Docker 网络里的 Ollama 服务：
 
-- `ANTHROPIC_BASE_URL`: 默认 `http://control-${CONTROL_BASE_PORT}:8080/anthropic`
+- `ANTHROPIC_BASE_URL`: 默认 `http://ollama:11434`
 - `ANTHROPIC_AUTH_TOKEN` / `ANTHROPIC_API_KEY`: 默认 `ollama`
 - `ANTHROPIC_MODEL`: 跟随模型管理里提交并部署的 Ollama 模型
 
 模型管理页面的“提交并部署”会同时更新 OpenClaw 与 Claude 配置：OpenClaw 写入 `config/openclaw/openclaw.json`，Claude 写入 `config/claude/settings.json` 和 `config/claude/config.json`。这样选择 Ollama 模型后，Claude 容器可以用同一套本地 key 与模型配置一键部署。
-
-内置 Anthropic 代理支持 `/anthropic/v1/messages` 和 `/anthropic/v1/models`，并会把 Claude Code 的 streaming 请求包装成 Ollama Chat 调用。默认不把 Claude Code 的 tools schema 转发给 Ollama，以避免小模型出现 `does not support tools` 或长时间卡住；如确实要透传工具 schema，可在控制面板环境变量中设置 `CLAUDE_PROXY_ENABLE_TOOLS=true`。
 
 ### 下载模型到 Ollama
 
@@ -254,9 +279,8 @@ ollama-claw/
 | `OPENCLAW_GATEWAY_HOST` | `172.31.0.10` | Gateway 主机地址 |
 | `OPENCLAW_GATEWAY_PORT` | `18790` | Gateway WebSocket 端口 |
 | `CONTROL_BASE_PORT` | `18080` | 控制面板宿主机端口；Agent 端口从该值 + 1 开始 |
-| `CLAUDE_ANTHROPIC_BASE_URL` | `http://control-${CONTROL_BASE_PORT}:8080/anthropic` | Claude 容器访问本地 Anthropic 兼容代理的地址 |
+| `CLAUDE_ANTHROPIC_BASE_URL` | `http://ollama:11434` | Claude 容器访问 Ollama 的地址 |
 | `CLAUDE_ANTHROPIC_AUTH_TOKEN` | `ollama` | 注入 Claude 的本地 API key/token |
-| `CLAUDE_PROXY_ENABLE_TOOLS` | 空 | 设置为 `true` 时把 Claude tools schema 透传给 Ollama |
 
 ## 故障排查
 
@@ -290,7 +314,7 @@ docker-compose up -d --build
 1. **新增 OpenClaw 容器类型**：`openclaw@2026.2.9` 是本项目新增的 Agent 模板，默认接入本地 Ollama 和 `openclaw-gateway`
 2. **保留 Claude 容器思路**：`claude@latest` 参考 hermit-claw 的 Claude 容器，预置信任/跳过 onboarding，并通过 `run_claude.js` 处理控制面板发送的消息
 3. **动态端口起点**：通过 `.env` 或环境变量设置 `CONTROL_BASE_PORT`，控制面板使用该端口，Agent 从 `CONTROL_BASE_PORT + 1` 递增
-4. **Claude 走本地 Anthropic 代理**：`claude@latest` 通过 `run_claude.js` 调 Claude Code CLI，并用 Ollama key 风格的一键配置接入本地代理
+4. **Claude 走 Ollama 配置**：`claude@latest` 通过 `run_claude.js` 调 Claude Code CLI，并用 Ollama key 风格的一键配置接入 `http://ollama:11434`
 5. **基于 Ollama**：OpenClaw 默认使用 Ollama 作为 LLM 后端，模型需支持工具调用
 
 ## 注意事项
@@ -298,3 +322,4 @@ docker-compose up -d --build
 1. Agent 使用资源限制：16GB 内存 + 8GB 共享内存
 2. 日志文件限制：500MB 大小，最多 2 个文件轮转
 3. 端口范围：Agent 分配端口为 `CONTROL_BASE_PORT + 1` 到 `CONTROL_BASE_PORT + 999`，默认是 `18081-19079`；当前 `.env` 示例是 `20001-20999`
+4. 容器内 `8082` 由主程序 `server.js` 占用并提供 `/ask`；底层 `ask_server.js` 使用 `8081`；工作区 web app 默认请使用 `APP_PORT` 或 `3000`

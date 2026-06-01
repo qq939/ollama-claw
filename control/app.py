@@ -7,6 +7,7 @@ import sys
 import time
 import json
 import threading
+import urllib.error
 import urllib.request
 from datetime import datetime, timezone, timedelta
 from io import BytesIO
@@ -45,6 +46,9 @@ AGENT_PATHS = {
     "claude@latest": {"project_path": "/home/agent/.claude/workspace/project", "sessions_path": "/home/agent/.claude/projects", "rules_path": "/home/agent/.claude/workspace/config-rules", "config_file": "openclaw.json"},
     "hermes@latest": {"project_path": "/home/agent/.hermes/workspace/project", "sessions_path": "/home/agent/.hermes/projects", "rules_path": "/home/agent/.hermes/workspace/config-rules", "config_file": "openclaw.json"},
 }
+CLAUDE_OLLAMA_PROVIDER_ID = "ollama-local"
+CLAUDE_DEFAULT_BASE_URL = os.environ.get("CLAUDE_ANTHROPIC_BASE_URL", "http://ollama:11434")
+CLAUDE_DEFAULT_AUTH_TOKEN = os.environ.get("CLAUDE_ANTHROPIC_AUTH_TOKEN", "ollama")
 
 def get_agent_paths(agent_type):
     return AGENT_PATHS.get(agent_type, AGENT_PATHS["openclaw@2026.2.9"])
@@ -294,10 +298,13 @@ def create_app(docker_client=None):
         raise RuntimeError("No available host port in configured range")
 
     def project_path_for_agent_type(agent_type):
-        return PROJECT_PATH
+        return get_agent_paths(agent_type)["project_path"]
 
     def log_path_for_agent_type(agent_type):
-        return LOG_PATH
+        return f"{project_path_for_agent_type(agent_type)}/logs/agent_tui.log"
+
+    def project_path_for_payload(payload):
+        return project_path_for_agent_type(payload.get("agent_type", "openclaw@2026.2.9"))
 
     def openclaw_env(spec):
         env_vars = {
@@ -320,6 +327,62 @@ def create_app(docker_client=None):
             if token:
                 env_vars["OPENCLAW_GATEWAY_TOKEN"] = token
         return env_vars
+
+    def read_json_file(path, default=None):
+        if not os.path.exists(path):
+            return default if default is not None else {}
+        for encoding in ("utf-8-sig", "utf-16"):
+            try:
+                with open(path, "r", encoding=encoding) as f:
+                    return json.load(f)
+            except Exception:
+                pass
+        return default if default is not None else {}
+
+    def write_json_file(path, data):
+        os.makedirs(os.path.dirname(path), exist_ok=True)
+        with open(path, "w", encoding="utf-8") as f:
+            json.dump(data, f, indent=2, ensure_ascii=False)
+            f.write("\n")
+
+    def claude_env(spec):
+        cfg_dir = os.path.join(app.config["CONFIG_ROOT"], spec["config_subdir"])
+        settings = read_json_file(os.path.join(cfg_dir, "settings.json"), {})
+        config = read_json_file(os.path.join(cfg_dir, "config.json"), {})
+        env_vars = {
+            "CLAUDE_CODE_TRUST_ALL": "true",
+            "CLAUDE_CODE_SKIP_ONBOARDING": "true",
+            "CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC": "1",
+            "ANTHROPIC_DISABLE_PREFLIGHT": "1",
+            "API_TIMEOUT_MS": "3000000",
+            "ANTHROPIC_BASE_URL": CLAUDE_DEFAULT_BASE_URL,
+            "ANTHROPIC_AUTH_TOKEN": CLAUDE_DEFAULT_AUTH_TOKEN,
+            "ANTHROPIC_API_KEY": CLAUDE_DEFAULT_AUTH_TOKEN,
+            "OLLAMA_BASE_URL": os.environ.get("OLLAMA_BASE_URL", "http://ollama:11434"),
+        }
+        settings_env = settings.get("env") if isinstance(settings, dict) else {}
+        if isinstance(settings_env, dict):
+            env_vars.update({k: str(v) for k, v in settings_env.items() if v is not None})
+        providers = (((config.get("claude") or {}).get("providers") or {}).values()) if isinstance(config, dict) else []
+        for provider in providers:
+            provider_env = ((provider or {}).get("settingsConfig") or {}).get("env") or {}
+            if isinstance(provider_env, dict):
+                env_vars.update({k: str(v) for k, v in provider_env.items() if v is not None})
+        model = str(settings.get("primaryModel") or env_vars.get("ANTHROPIC_MODEL") or "qwen2.5:0.5b")
+        env_vars["ANTHROPIC_BASE_URL"] = os.environ.get("CLAUDE_ANTHROPIC_BASE_URL", env_vars.get("ANTHROPIC_BASE_URL") or CLAUDE_DEFAULT_BASE_URL)
+        env_vars["ANTHROPIC_AUTH_TOKEN"] = os.environ.get("CLAUDE_ANTHROPIC_AUTH_TOKEN", env_vars.get("ANTHROPIC_AUTH_TOKEN") or CLAUDE_DEFAULT_AUTH_TOKEN)
+        env_vars["ANTHROPIC_API_KEY"] = env_vars.get("ANTHROPIC_API_KEY") or env_vars["ANTHROPIC_AUTH_TOKEN"]
+        env_vars.setdefault("ANTHROPIC_MODEL", model)
+        env_vars.setdefault("ANTHROPIC_DEFAULT_HAIKU_MODEL", model)
+        env_vars.setdefault("ANTHROPIC_DEFAULT_OPUS_MODEL", model)
+        env_vars.setdefault("ANTHROPIC_DEFAULT_SONNET_MODEL", model)
+        env_vars.setdefault("OLLAMA_MODEL", model)
+        return env_vars
+
+    def agent_env(agent_type, spec):
+        if agent_type in ("claude@latest", "hermes@latest"):
+            return claude_env(spec)
+        return openclaw_env(spec)
 
     def split_openclaw_model_name(raw_model):
         model = (raw_model or "").strip()
@@ -391,6 +454,79 @@ def create_app(docker_client=None):
             "ollama_model": ollama_model,
         }
 
+    def upsert_claude_ollama_model(model_name):
+        _, ollama_model = split_openclaw_model_name(model_name)
+        claude_dir = os.path.join(app.config["CONFIG_ROOT"], "claude")
+        settings_path = os.path.join(claude_dir, "settings.json")
+        config_path = os.path.join(claude_dir, "config.json")
+        base_url = os.environ.get("CLAUDE_ANTHROPIC_BASE_URL", CLAUDE_DEFAULT_BASE_URL)
+        token = os.environ.get("CLAUDE_ANTHROPIC_AUTH_TOKEN", CLAUDE_DEFAULT_AUTH_TOKEN)
+        env = {
+            "ANTHROPIC_BASE_URL": base_url,
+            "ANTHROPIC_AUTH_TOKEN": token,
+            "ANTHROPIC_API_KEY": token,
+            "ANTHROPIC_MODEL": ollama_model,
+            "ANTHROPIC_DEFAULT_HAIKU_MODEL": ollama_model,
+            "ANTHROPIC_DEFAULT_OPUS_MODEL": ollama_model,
+            "ANTHROPIC_DEFAULT_SONNET_MODEL": ollama_model,
+            "OLLAMA_BASE_URL": os.environ.get("OLLAMA_BASE_URL", "http://ollama:11434"),
+            "OLLAMA_MODEL": ollama_model,
+            "API_TIMEOUT_MS": "3000000",
+            "ANTHROPIC_DISABLE_PREFLIGHT": "1",
+            "CLAUDE_CODE_TRUST_ALL": "true",
+            "CLAUDE_CODE_SKIP_ONBOARDING": "true",
+            "CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC": "1",
+        }
+
+        settings = read_json_file(settings_path, {})
+        if not isinstance(settings, dict):
+            settings = {}
+        settings.update({
+            "env": env,
+            "primaryModel": ollama_model,
+            "hasCompletedOnboarding": True,
+            "hasTrustDialogAccepted": True,
+            "hasCompletedProjectOnboarding": True,
+            "trustedProjects": ["/home/agent/.claude/workspace/project"],
+        })
+        write_json_file(settings_path, settings)
+
+        config = read_json_file(config_path, {})
+        if not isinstance(config, dict):
+            config = {}
+        config.setdefault("version", 2)
+        config.setdefault("permissions", [{"path": "/**", "mode": ["read", "write"]}])
+        claude = config.setdefault("claude", {})
+        providers = claude.setdefault("providers", {})
+        providers[CLAUDE_OLLAMA_PROVIDER_ID] = {
+            "id": CLAUDE_OLLAMA_PROVIDER_ID,
+            "name": "Ollama",
+            "settingsConfig": {"env": env},
+            "websiteUrl": "https://ollama.com/library",
+            "category": "local",
+            "createdAt": int(time.time() * 1000),
+            "meta": {
+                "custom_endpoints": {
+                    base_url: {"url": base_url, "addedAt": int(time.time() * 1000)}
+                }
+            },
+        }
+        claude["current"] = CLAUDE_OLLAMA_PROVIDER_ID
+        for key in ("omo", "codex", "gemini", "opencode"):
+            config.setdefault(key, {"providers": {}, "current": ""})
+        config.setdefault("mcp", {"servers": {}})
+        config.setdefault("prompts", {"claude": {"prompts": {}}, "codex": {"prompts": {}}, "gemini": {"prompts": {}}, "opencode": {"prompts": {}}})
+        config.setdefault("skills", {"skills": {}, "repos": []})
+        config.setdefault("common_config_snippets", {})
+        write_json_file(config_path, config)
+        return {
+            "settings_path": settings_path,
+            "config_path": config_path,
+            "model": ollama_model,
+            "base_url": base_url,
+            "auth_token_configured": bool(token),
+        }
+
     def pull_ollama_model_async(ollama_model):
         started_at = now_iso()
         ollama_pull_jobs[ollama_model] = {"status": "pulling", "started_at": started_at, "error": "", "progress": 0, "total": None, "digest": ""}
@@ -442,7 +578,7 @@ def create_app(docker_client=None):
             try:
                 payload = recreate_agent(c.name)
                 add_frpc_rule(payload["host_port"])
-                scp_rules_to_container(payload["container_name"], PROJECT_PATH)
+                scp_rules_to_container(payload["container_name"], project_path_for_payload(payload))
                 recreated.append(payload)
                 if not gateway_token:
                     gateway_token = openclaw_env(AGENT_SPECS[payload["agent_type"]]).get("OPENCLAW_GATEWAY_TOKEN", "")
@@ -548,56 +684,33 @@ console.log(count);
                 env[k] = v
         return env
 
-    def send_openclaw_message(container, message):
-        import base64
+    def send_agent_message(container, message):
         labels = ((getattr(container, "attrs", {}) or {}).get("Config", {}) or {}).get("Labels", {}) or (getattr(container, "labels", {}) or {})
         agent_type = labels.get("hermit.agent_type") or "openclaw@2026.2.9"
-        agent_paths = get_agent_paths(agent_type)
-        project_path = agent_paths["project_path"]
-        config_file = agent_paths["config_file"]
-        agent_dir = agent_type.split("@")[0]
-        
         msg_to_send = message or INITIAL_MESSAGE
-        msg_b64 = base64.b64encode(msg_to_send.encode("utf-8")).decode("ascii")
-        runner_path = f"{project_path}/.openclaw-send-message.sh"
-        log_path = LOG_PATH
-        runner = f"""#!/bin/sh
-set -eu
-mkdir -p "{LOGS_PATH}"
-node -e 'const fs=require("fs"); const p=process.env.HOME+"/.{agent_dir}/"+"{config_file}"; if(fs.existsSync(p)){{const j=JSON.parse(fs.readFileSync(p,"utf8")); j.gateway=j.gateway={{}}; j.gateway.mode="remote"; j.gateway.remote=j.gateway.remote={{}}; j.gateway.remote.url="ws://"+(process.env.OPENCLAW_GATEWAY_HOST||"172.30.0.10")+":"+(process.env.OPENCLAW_GATEWAY_PORT||"18790"); if(process.env.OPENCLAW_GATEWAY_TOKEN) j.gateway.remote.token=process.env.OPENCLAW_GATEWAY_TOKEN; delete j.gateway.bind; fs.writeFileSync(p,JSON.stringify(j,null,2)); fs.chmodSync(p,0o600);}}'
-msg_file="$(mktemp /tmp/openclaw-message.XXXXXX)"
-out_file="$(mktemp /tmp/openclaw-output.XXXXXX)"
-trap 'rm -f "$msg_file" "$out_file"' EXIT
-printf '%s' '{msg_b64}' | base64 -d > "$msg_file"
-printf '\\n[{agent_type}] %s\\n' "$(date '+%Y-%m-%d %H:%M:%S')" >> "{log_path}"
-if timeout 120 openclaw agent --agent main --message "$(cat "$msg_file")" --timeout 90 > "$out_file" 2>&1; then
-  printf '[{agent_type}-exit] 0\\n' >> "{log_path}"
-else
-  code="$?"
-  printf '[{agent_type}-exit] %s\\n' "$code" >> "{log_path}"
-fi
-sed -e 's/\x1b\[[0-?]*[ -\/]*[@-~]//g' "$out_file" | tail -120 >> "{log_path}"
-"""
-        runner_b64 = base64.b64encode(runner.encode("utf-8")).decode("ascii")
-        write_cmd = f"printf '%s' '{runner_b64}' | base64 -d > '{runner_path}' && chmod +x '{runner_path}'"
-        result = container.exec_run(["/bin/sh", "-lc", write_cmd], user=AGENT_RUNTIME_USER)
-        if result.exit_code != 0:
-            output = result.output.decode("utf-8", errors="replace") if isinstance(result.output, bytes) else str(result.output)
-            raise RuntimeError(output or "failed to write OpenClaw message runner")
-        run_cmd = f"nohup /bin/sh '{runner_path}' >> '{log_path}' 2>&1 &"
-        result = container.exec_run(["/bin/sh", "-lc", run_cmd], user=AGENT_RUNTIME_USER, detach=True)
-        env = container_env(container)
-        token = env.get("OPENCLAW_GATEWAY_TOKEN", "")
-        if token:
-            time.sleep(2)
-            if auto_pair_openclaw_client(token, timeout_seconds=3):
-                container.exec_run(["/bin/sh", "-lc", run_cmd], user=AGENT_RUNTIME_USER, detach=True)
-        return result
+        payload = json.dumps({"message": msg_to_send}, ensure_ascii=False).encode("utf-8")
+        url = f"http://{container.name}:{SERVICE_PORT}/ask"
+        req = urllib.request.Request(url, data=payload, headers={"Content-Type": "application/json"}, method="POST")
+        try:
+            with urllib.request.urlopen(req, timeout=140) as resp:
+                raw = resp.read().decode("utf-8", errors="replace")
+                return json.loads(raw) if raw else {"ok": True, "agent_type": agent_type}
+        except urllib.error.HTTPError as e:
+            raw = e.read().decode("utf-8", errors="replace")
+            try:
+                data = json.loads(raw)
+            except Exception:
+                data = {"error": raw or str(e)}
+            raise RuntimeError(data.get("error") or data.get("output") or str(e))
 
     def append_user_log(container, message):
+        labels = ((getattr(container, "attrs", {}) or {}).get("Config", {}) or {}).get("Labels", {}) or (getattr(container, "labels", {}) or {})
+        agent_type = labels.get("hermit.agent_type") or "openclaw@2026.2.9"
+        log_path = log_path_for_agent_type(agent_type)
+        logs_path = os.path.dirname(log_path)
         ts = datetime.now(timezone(timedelta(hours=8))).strftime("%Y-%m-%d %H:%M:%S")
         safe = (message or INITIAL_MESSAGE).replace("'", "'\"'\"'")
-        container.exec_run(["/bin/sh", "-c", f"mkdir -p '{LOGS_PATH}' && echo '[{ts}] $ {safe}' >> '{LOG_PATH}'"], user=AGENT_RUNTIME_USER)
+        container.exec_run(["/bin/sh", "-c", f"mkdir -p '{logs_path}' && echo '[{ts}] $ {safe}' >> '{log_path}'"], user=AGENT_RUNTIME_USER)
 
     def clean_log_text(text):
         cleaned = ANSI_ESCAPE_PATTERN.sub("", text or "")
@@ -697,18 +810,22 @@ sed -e 's/\x1b\[[0-?]*[ -\/]*[@-~]//g' "$out_file" | tail -120 >> "{log_path}"
         host_config_root = app.config["HOST_CONFIG_ROOT"]
         host_workspaces_root = app.config["HOST_WORKSPACES_ROOT"]
         host_logs_root = app.config.get("HOST_LOGS_ROOT") or os.path.join(os.path.dirname(host_workspaces_root), "logs")
+        agent_paths = get_agent_paths(agent_type)
+        project_path = agent_paths["project_path"]
+        sessions_path = agent_paths["sessions_path"]
+        rules_path = agent_paths["rules_path"]
+        logs_path = f"{project_path}/logs"
         ensure_host_agent_dirs(container_name)
-        log_bind = LOGS_PATH
         volumes = {
             f"{host_config_root}/{spec['config_subdir']}": {"bind": "/agent-config", "mode": "ro"},
-            f"{host_workspaces_root}/{container_name}": {"bind": PROJECT_PATH, "mode": "rw"},
-            f"{host_workspaces_root}/{container_name}/sessions": {"bind": SESSIONS_PATH, "mode": "rw"},
-            f"{host_logs_root}/{container_name}": {"bind": log_bind, "mode": "rw"},
-            f"{host_config_root}/rules": {"bind": RULES_PATH, "mode": "ro"},
+            f"{host_workspaces_root}/{container_name}": {"bind": project_path, "mode": "rw"},
+            f"{host_workspaces_root}/{container_name}/sessions": {"bind": sessions_path, "mode": "rw"},
+            f"{host_logs_root}/{container_name}": {"bind": logs_path, "mode": "rw"},
+            f"{host_config_root}/rules": {"bind": rules_path, "mode": "ro"},
         }
         log_config = LogConfig(type=LogConfig.types.JSON, config={"max-size": "500m", "max-file": "2"})
 
-        env_vars = openclaw_env(spec)
+        env_vars = agent_env(agent_type, spec)
         gateway_token = env_vars.get("OPENCLAW_GATEWAY_TOKEN", "")
 
         container = docker_client_or_default().containers.run(
@@ -734,18 +851,19 @@ sed -e 's/\x1b\[[0-?]*[ -\/]*[@-~]//g' "$out_file" | tail -120 >> "{log_path}"
         if not body.get("skip_initial_message"):
             # 创建容器后发送初始消息
             time.sleep(3)
-            auto_pair_openclaw_client(gateway_token)
+            if agent_type == "openclaw@2026.2.9":
+                auto_pair_openclaw_client(gateway_token)
             user_msg = (body.get("message") or "").strip()
             msg_to_send = user_msg or INITIAL_MESSAGE
             try:
-                append_user_log(container, msg_to_send)
-                send_openclaw_message(container, msg_to_send)
+                send_agent_message(container, msg_to_send)
             except Exception as e:
                 print(f"[send-message] initial send failed: {e}", flush=True, file=sys.stderr)
 
         else:
             time.sleep(3)
-            auto_pair_openclaw_client(gateway_token)
+            if agent_type == "openclaw@2026.2.9":
+                auto_pair_openclaw_client(gateway_token)
 
         return {
             "container_name": container.name,
@@ -768,14 +886,18 @@ sed -e 's/\x1b\[[0-?]*[ -\/]*[@-~]//g' "$out_file" | tail -120 >> "{log_path}"
         host_config_root = app.config["HOST_CONFIG_ROOT"]
         host_workspaces_root = app.config["HOST_WORKSPACES_ROOT"]
         host_logs_root = app.config.get("HOST_LOGS_ROOT") or os.path.join(os.path.dirname(host_workspaces_root), "logs")
+        agent_paths = get_agent_paths(agent_type)
+        project_path = agent_paths["project_path"]
+        sessions_path = agent_paths["sessions_path"]
+        rules_path = agent_paths["rules_path"]
+        logs_path = f"{project_path}/logs"
         ensure_host_agent_dirs(container_name)
-        log_bind = LOGS_PATH
         volumes = {
             f"{host_config_root}/{spec['config_subdir']}": {"bind": "/agent-config", "mode": "ro"},
-            f"{host_workspaces_root}/{container_name}": {"bind": PROJECT_PATH, "mode": "rw"},
-            f"{host_workspaces_root}/{container_name}/sessions": {"bind": SESSIONS_PATH, "mode": "rw"},
-            f"{host_logs_root}/{container_name}": {"bind": log_bind, "mode": "rw"},
-            f"{host_config_root}/rules": {"bind": RULES_PATH, "mode": "ro"},
+            f"{host_workspaces_root}/{container_name}": {"bind": project_path, "mode": "rw"},
+            f"{host_workspaces_root}/{container_name}/sessions": {"bind": sessions_path, "mode": "rw"},
+            f"{host_logs_root}/{container_name}": {"bind": logs_path, "mode": "rw"},
+            f"{host_config_root}/rules": {"bind": rules_path, "mode": "ro"},
         }
         log_config = LogConfig(type=LogConfig.types.JSON, config={"max-size": "500m", "max-file": "2"})
         container.remove(force=True)
@@ -785,7 +907,7 @@ sed -e 's/\x1b\[[0-?]*[ -\/]*[@-~]//g' "$out_file" | tail -120 >> "{log_path}"
         except Exception:
             pass
 
-        env_vars = openclaw_env(spec)
+        env_vars = agent_env(agent_type, spec)
         gateway_token = env_vars.get("OPENCLAW_GATEWAY_TOKEN", "")
 
         new_container = docker_client_or_default().containers.run(
@@ -810,7 +932,8 @@ sed -e 's/\x1b\[[0-?]*[ -\/]*[@-~]//g' "$out_file" | tail -120 >> "{log_path}"
             extra_hosts=["host.docker.internal:host-gateway"],
         )
         time.sleep(3)
-        auto_pair_openclaw_client(gateway_token)
+        if agent_type == "openclaw@2026.2.9":
+            auto_pair_openclaw_client(gateway_token)
         return {"container_name": new_container.name, "agent_type": agent_type, "host_port": host_port, "ssh_port": host_port - 10000, "service_port": SERVICE_PORT, "recreated_at": now_iso()}
 
     def fork_agent(container_name):
@@ -1006,7 +1129,7 @@ sed -e 's/\x1b\[[0-?]*[ -\/]*[@-~]//g' "$out_file" | tail -120 >> "{log_path}"
                 return
             labels = ((container.attrs or {}).get("Config", {}) or {}).get("Labels", {}) or {}
             agent_type = labels.get("hermit.agent_type", "")
-            project_path = PROJECT_PATH
+            project_path = project_path_for_agent_type(agent_type)
 
             import paramiko
         except ImportError:
@@ -1125,7 +1248,7 @@ sed -e 's/\x1b\[[0-?]*[ -\/]*[@-~]//g' "$out_file" | tail -120 >> "{log_path}"
         try:
             payload = create_agent(agent_type, name, body)
             add_frpc_rule(payload["host_port"])
-            scp_rules_to_container(payload["container_name"], PROJECT_PATH)
+            scp_rules_to_container(payload["container_name"], project_path_for_payload(payload))
             return jsonify(payload), 201
         except ValueError as e:
             return jsonify({"error": str(e)}), 400
@@ -1201,11 +1324,10 @@ sed -e 's/\x1b\[[0-?]*[ -\/]*[@-~]//g' "$out_file" | tail -120 >> "{log_path}"
             agent_type = labels.get("hermit.agent_type", "")
             msg_to_send = message or INITIAL_MESSAGE
             try:
-                append_user_log(container, msg_to_send)
-                send_openclaw_message(container, msg_to_send)
+                result = send_agent_message(container, msg_to_send)
             except Exception as e:
                 return jsonify({"error": str(e)}), 500
-            return jsonify({"ok": True, "container_name": name, "message": message, "agent_type": agent_type, "sent_at": now_iso()})
+            return jsonify({"ok": True, "container_name": name, "message": message, "agent_type": agent_type, "result": result, "sent_at": now_iso()})
         except PermissionError as e:
             return jsonify({"error": str(e)}), 403
         except docker.errors.NotFound:
@@ -1347,7 +1469,7 @@ sed -e 's/\x1b\[[0-?]*[ -\/]*[@-~]//g' "$out_file" | tail -120 >> "{log_path}"
                 return jsonify({"error": output or f"git {git_action} failed"}), 400
             payload = recreate_agent(name)
             add_frpc_rule(payload["host_port"])
-            scp_rules_to_container(payload["container_name"], project_path)
+            scp_rules_to_container(payload["container_name"], project_path_for_payload(payload))
             return jsonify({
                 "ok": True,
                 "mode": "hard_reset" if hard_reset else "checkout",
@@ -1377,12 +1499,11 @@ sed -e 's/\x1b\[[0-?]*[ -\/]*[@-~]//g' "$out_file" | tail -120 >> "{log_path}"
             add_frpc_rule(payload["host_port"])
             import time
             time.sleep(8)
-            scp_rules_to_container(payload["container_name"], PROJECT_PATH)
+            scp_rules_to_container(payload["container_name"], project_path_for_payload(payload))
             default_msg = INITIAL_MESSAGE
             try:
                 container_new = docker_client_or_default().containers.get(payload["container_name"])
-                append_user_log(container_new, default_msg)
-                send_openclaw_message(container_new, default_msg)
+                send_agent_message(container_new, default_msg)
             except Exception as e:
                 print(f"[recreate] send initial message failed: {e}", flush=True, file=sys.stderr)
             return jsonify(payload)
@@ -1417,7 +1538,7 @@ sed -e 's/\x1b\[[0-?]*[ -\/]*[@-~]//g' "$out_file" | tail -120 >> "{log_path}"
                 agent_type = labels.get("hermit.agent_type", "")
                 payload = recreate_agent(c.name)
                 add_frpc_rule(payload["host_port"])
-                scp_rules_to_container(payload["container_name"], PROJECT_PATH)
+                scp_rules_to_container(payload["container_name"], project_path_for_payload(payload))
                 recreated.append(payload)
             except Exception as e:
                 errors[c.name] = str(e)
@@ -1466,6 +1587,7 @@ sed -e 's/\x1b\[[0-?]*[ -\/]*[@-~]//g' "$out_file" | tail -120 >> "{log_path}"
         model_name = (body.get("model") or "").strip()
         try:
             model_info = upsert_openclaw_ollama_model(model_name)
+            claude_info = upsert_claude_ollama_model(model_name)
             pull_info = pull_ollama_model_async(model_info["ollama_model"])
             restarted_gateway = restart_openclaw_gateway()
             # Give the gateway a moment to reload config before agents reconnect.
@@ -1477,6 +1599,7 @@ sed -e 's/\x1b\[[0-?]*[ -\/]*[@-~]//g' "$out_file" | tail -120 >> "{log_path}"
                 "model": model_info["primary_model"],
                 "ollama_model": model_info["ollama_model"],
                 "config_path": model_info["config_path"],
+                "claude": claude_info,
                 "ollama_pull": pull_info,
                 "restarted_gateway": restarted_gateway,
                 "recreated_agents": recreated_agents,
