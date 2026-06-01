@@ -60,6 +60,8 @@ services:
       - OPENCLAW_GATEWAY_TOKEN=${OPENCLAW_GATEWAY_TOKEN:-2ac145e2572b9b2fb44717b520c22588858403a75d4a6ea2}
       - OLLAMA_BASE_URL=http://ollama:11434
       - CONTROL_BASE_PORT=${CONTROL_BASE_PORT:-18080}
+      - CLAUDE_ANTHROPIC_BASE_URL=${CLAUDE_ANTHROPIC_BASE_URL:-http://control-${CONTROL_BASE_PORT:-18080}:8080/anthropic}
+      - CLAUDE_ANTHROPIC_AUTH_TOKEN=${CLAUDE_ANTHROPIC_AUTH_TOKEN:-ollama}
     extra_hosts:
       - "host.docker.internal:host-gateway"
     volumes:

@@ -176,6 +176,18 @@ DELETE /api/agents/{container_name}
 
 注意：OpenClaw 会使用工具调用能力，`deepseek-r1:1.5b` 这类不支持 tools 的 Ollama 模型会报 `does not support tools`。默认配置使用 `ollama/qwen2.5:0.5b`，部署模型时请优先选择支持 tools 的 `qwen2.5`、`qwen3` 等模型。
 
+### Claude + Ollama 配置
+
+Claude 容器使用 `run_claude.js` 调用 Claude Code CLI，不再把 Claude 消息转给 `openclaw` 命令。控制面板会把 `config/claude/settings.json`、`config/claude/config.json` 注入到容器内的 `/home/agent/.claude/`，默认通过本项目内置的 Anthropic 兼容代理访问 Ollama：
+
+- `ANTHROPIC_BASE_URL`: 默认 `http://control-${CONTROL_BASE_PORT}:8080/anthropic`
+- `ANTHROPIC_AUTH_TOKEN` / `ANTHROPIC_API_KEY`: 默认 `ollama`
+- `ANTHROPIC_MODEL`: 跟随模型管理里提交并部署的 Ollama 模型
+
+模型管理页面的“提交并部署”会同时更新 OpenClaw 与 Claude 配置：OpenClaw 写入 `config/openclaw/openclaw.json`，Claude 写入 `config/claude/settings.json` 和 `config/claude/config.json`。这样选择 Ollama 模型后，Claude 容器可以用同一套本地 key 与模型配置一键部署。
+
+内置 Anthropic 代理支持 `/anthropic/v1/messages` 和 `/anthropic/v1/models`，并会把 Claude Code 的 streaming 请求包装成 Ollama Chat 调用。默认不把 Claude Code 的 tools schema 转发给 Ollama，以避免小模型出现 `does not support tools` 或长时间卡住；如确实要透传工具 schema，可在控制面板环境变量中设置 `CLAUDE_PROXY_ENABLE_TOOLS=true`。
+
 ### 下载模型到 Ollama
 
 ```bash
@@ -223,6 +235,7 @@ ollama-claw/
 │   ├── openclaw/                # OpenClaw 配置
 │   │   └── openclaw.json
 │   ├── claude/                  # Claude 配置
+│   │   ├── config.json          # Claude/Ollama provider 配置
 │   │   ├── openclaw.json
 │   │   └── settings.json
 │   ├── hermes/                  # Hermes 配置
@@ -241,6 +254,9 @@ ollama-claw/
 | `OPENCLAW_GATEWAY_HOST` | `172.31.0.10` | Gateway 主机地址 |
 | `OPENCLAW_GATEWAY_PORT` | `18790` | Gateway WebSocket 端口 |
 | `CONTROL_BASE_PORT` | `18080` | 控制面板宿主机端口；Agent 端口从该值 + 1 开始 |
+| `CLAUDE_ANTHROPIC_BASE_URL` | `http://control-${CONTROL_BASE_PORT}:8080/anthropic` | Claude 容器访问本地 Anthropic 兼容代理的地址 |
+| `CLAUDE_ANTHROPIC_AUTH_TOKEN` | `ollama` | 注入 Claude 的本地 API key/token |
+| `CLAUDE_PROXY_ENABLE_TOOLS` | 空 | 设置为 `true` 时把 Claude tools schema 透传给 Ollama |
 
 ## 故障排查
 
@@ -274,7 +290,8 @@ docker-compose up -d --build
 1. **新增 OpenClaw 容器类型**：`openclaw@2026.2.9` 是本项目新增的 Agent 模板，默认接入本地 Ollama 和 `openclaw-gateway`
 2. **保留 Claude 容器思路**：`claude@latest` 参考 hermit-claw 的 Claude 容器，预置信任/跳过 onboarding，并通过 `run_claude.js` 处理控制面板发送的消息
 3. **动态端口起点**：通过 `.env` 或环境变量设置 `CONTROL_BASE_PORT`，控制面板使用该端口，Agent 从 `CONTROL_BASE_PORT + 1` 递增
-4. **基于 Ollama**：OpenClaw 默认使用 Ollama 作为 LLM 后端，模型需支持工具调用
+4. **Claude 走本地 Anthropic 代理**：`claude@latest` 通过 `run_claude.js` 调 Claude Code CLI，并用 Ollama key 风格的一键配置接入本地代理
+5. **基于 Ollama**：OpenClaw 默认使用 Ollama 作为 LLM 后端，模型需支持工具调用
 
 ## 注意事项
 

@@ -1,0 +1,87 @@
+{
+  "version": 2,
+  "permissions": [
+    {
+      "path": "/**",
+      "mode": [
+        "read",
+        "write"
+      ]
+    }
+  ],
+  "claude": {
+    "providers": {
+      "ollama-local": {
+        "id": "ollama-local",
+        "name": "Ollama",
+        "settingsConfig": {
+          "env": {
+            "ANTHROPIC_BASE_URL": "http://control-20000:8080/anthropic",
+            "ANTHROPIC_AUTH_TOKEN": "ollama",
+            "ANTHROPIC_API_KEY": "ollama",
+            "ANTHROPIC_MODEL": "qwen2.5:0.5b",
+            "ANTHROPIC_DEFAULT_HAIKU_MODEL": "qwen2.5:0.5b",
+            "ANTHROPIC_DEFAULT_OPUS_MODEL": "qwen2.5:0.5b",
+            "ANTHROPIC_DEFAULT_SONNET_MODEL": "qwen2.5:0.5b",
+            "OLLAMA_MODEL": "qwen2.5:0.5b",
+            "API_TIMEOUT_MS": "3000000",
+            "ANTHROPIC_DISABLE_PREFLIGHT": "1",
+            "CLAUDE_CODE_TRUST_ALL": "true",
+            "CLAUDE_CODE_SKIP_ONBOARDING": "true",
+            "CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC": "1"
+          }
+        },
+        "websiteUrl": "https://ollama.com/library",
+        "category": "local",
+        "createdAt": 1780302663650,
+        "meta": {
+          "custom_endpoints": {
+            "http://control-20000:8080/anthropic": {
+              "url": "http://control-20000:8080/anthropic",
+              "addedAt": 1780302663650
+            }
+          }
+        }
+      }
+    },
+    "current": "ollama-local"
+  },
+  "omo": {
+    "providers": {},
+    "current": ""
+  },
+  "codex": {
+    "providers": {},
+    "current": ""
+  },
+  "gemini": {
+    "providers": {},
+    "current": ""
+  },
+  "opencode": {
+    "providers": {},
+    "current": ""
+  },
+  "mcp": {
+    "servers": {}
+  },
+  "prompts": {
+    "claude": {
+      "prompts": {}
+    },
+    "codex": {
+      "prompts": {}
+    },
+    "gemini": {
+      "prompts": {}
+    },
+    "opencode": {
+      "prompts": {}
+    }
+  },
+  "skills": {
+    "skills": {},
+    "repos": []
+  },
+  "common_config_snippets": {}
+}
