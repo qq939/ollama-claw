@@ -81,6 +81,8 @@ services:
     image: ollama-claw-agent-openclaw:latest
     container_name: ollama-claw-agent-openclaw-template
     command: ["sleep", "infinity"]
+    networks:
+      - ollama-claw-network
 
   agent-image-claude:
     build:
@@ -89,6 +91,8 @@ services:
     image: ollama-claw-agent-claude:latest
     container_name: ollama-claw-agent-claude-template
     command: ["sleep", "infinity"]
+    networks:
+      - ollama-claw-network
 
   agent-image-hermes:
     build:
@@ -97,6 +101,8 @@ services:
     image: ollama-claw-agent-hermes:latest
     container_name: ollama-claw-agent-hermes-template
     command: ["sleep", "infinity"]
+    networks:
+      - ollama-claw-network
 
 volumes:
   ollama-data:

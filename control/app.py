@@ -194,9 +194,13 @@ def create_app(docker_client=None):
         items = []
         control_name = f"control-{CONTROL_BASE_PORT}"
         excluded = {control_name, "openclaw-gateway", "ollama", "ollama-claw-agent-image-openclaw-1"}
+        network_name = "ollama-claw_ollama-claw-network"
         for c in all_containers():
+            container_networks = (c.attrs.get("NetworkSettings", {}).get("Networks", {}) or {}).keys()
+            in_target_network = any(network_name in n for n in container_networks)
             if is_managed(c):
-                items.append(c)
+                if in_target_network:
+                    items.append(c)
                 continue
             svc = (((getattr(c, "attrs", {}) or {}).get("Config", {}) or {}).get("Labels", {}) or {}).get("com.docker.compose.service") or ""
             if is_compose_member(c) and c.name not in excluded and svc != "agent-image-openclaw" and c.name.startswith("ollama-claw-agent-"):
