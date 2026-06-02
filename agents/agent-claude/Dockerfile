@@ -77,6 +77,7 @@ CMD ["/bin/sh", "-lc", " \
     if [ -d /agent-config ]; then \
         for f in /agent-config/*; do \
             [ \"$f\" = \"/agent-config/workspace\" ] && continue; \
+            [ \"$f\" = \"/agent-config/rules\" ] && continue; \
             [ -d \"$f\" ] && cp -R \"$f\" \"$HOME/.claude/\" 2>/dev/null || [ -f \"$f\" ] && cp -f \"$f\" \"$HOME/.claude/\" 2>/dev/null; \
         done; \
     fi; \

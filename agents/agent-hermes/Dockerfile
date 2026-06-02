@@ -69,7 +69,13 @@ EXPOSE 8082
 
 CMD ["/bin/sh", "-lc", " \
     mkdir -p \"$HOME/.hermes\"; \
-    if [ -d /agent-config ]; then cp -R -f /agent-config/. \"$HOME/.hermes/\"; fi; \
+    if [ -d /agent-config ]; then \
+        for f in /agent-config/*; do \
+            [ \"$f\" = \"/agent-config/workspace\" ] && continue; \
+            [ \"$f\" = \"/agent-config/rules\" ] && continue; \
+            [ -d \"$f\" ] && cp -R \"$f\" \"$HOME/.hermes/\" 2>/dev/null || [ -f \"$f\" ] && cp -f \"$f\" \"$HOME/.hermes/\" 2>/dev/null; \
+        done; \
+    fi; \
     mkdir -p /home/agent/.hermes/workspace/project/logs; \
     /usr/sbin/sshd; \
     cp -f /usr/local/bin/start.sh /home/agent/.hermes/workspace/project/start.sh; \

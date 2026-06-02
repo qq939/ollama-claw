@@ -68,7 +68,13 @@ EXPOSE 8082
 
 CMD ["/bin/sh", "-lc", " \
     mkdir -p \"$HOME/.openclaw\"; \
-    if [ -d /agent-config ]; then cp -R -f /agent-config/. \"$HOME/.openclaw/\"; fi; \
+    if [ -d /agent-config ]; then \
+        for f in /agent-config/*; do \
+            [ \"$f\" = \"/agent-config/workspace\" ] && continue; \
+            [ \"$f\" = \"/agent-config/rules\" ] && continue; \
+            [ -d \"$f\" ] && cp -R \"$f\" \"$HOME/.openclaw/\" 2>/dev/null || [ -f \"$f\" ] && cp -f \"$f\" \"$HOME/.openclaw/\" 2>/dev/null; \
+        done; \
+    fi; \
     mkdir -p /home/agent/.openclaw/workspace/project/logs; \
     /usr/sbin/sshd; \
     node -e ' \
