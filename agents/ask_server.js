@@ -4,7 +4,7 @@ const fs = require('fs');
 const path = require('path');
 
 const PORT = Number(process.env.ASK_PORT || 8081);
-const HOST = process.env.ASK_HOST || '127.0.0.1';
+const HOST = process.env.ASK_HOST || '0.0.0.0';
 const AGENT_KIND = process.env.AGENT_KIND || 'openclaw';
 const PROJECT_PATH = process.env.PROJECT_PATH || `/home/agent/.${AGENT_KIND}/workspace/project`;
 const LOG_PATH = process.env.LOG_PATH || path.join(PROJECT_PATH, 'logs/agent_tui.log');

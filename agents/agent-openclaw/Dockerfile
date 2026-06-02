@@ -100,6 +100,7 @@ CMD ["/bin/sh", "-lc", " \
         } \
     '; \
     cp -f /usr/local/bin/start.sh /home/agent/.openclaw/workspace/project/start.sh; \
+    sed -i 's/\r$//' /home/agent/.openclaw/workspace/project/start.sh; \
     chmod +x /home/agent/.openclaw/workspace/project/start.sh; \
     if [ -f /home/agent/.openclaw/workspace/project/start.sh ] && [ -s /home/agent/.openclaw/workspace/project/start.sh ]; then \
         chmod +x /home/agent/.openclaw/workspace/project/start.sh; \

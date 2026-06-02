@@ -90,7 +90,7 @@
   2) 启动 SSH 服务（端口 22）
   3) 生成 ~/.claude/settings.json，设置 trustedProjects、hasCompletedOnboarding 等字段
   4) 将平台内置 start.sh 放入项目目录并执行它
-  5) start.sh 启动内部 ask_server.js（127.0.0.1:8081/ask）
+  5) start.sh 启动内部 ask_server.js（0.0.0.0:8081/ask）
   6) 如果存在 user_start.sh，start.sh 会执行它并后台运行
 
 重要约束：Agent 只能修改 user_start.sh，不能修改 start.sh。
@@ -117,7 +117,7 @@
 
 你需要在工作目录里生成主程序 `server.js`，监听 `0.0.0.0:8082`。`server.js` 的 `/ask` 必须转发到内部 `ask_server.js` 的 `/ask`，也就是 `http://127.0.0.1:8081/ask`。
 
-基础容器已经提供 `ask_server.js`，它监听 `127.0.0.1:8081`，只处理底层 Agent 调用。控制面板内部发消息会直接调用 `8081/ask`；宿主机或浏览器访问应走你生成的 `8082/ask`。
+基础容器已经提供 `ask_server.js`，它监听 `0.0.0.0:8081`，只处理底层 Agent 调用。控制面板内部发消息会通过 Docker 网络直接调用 `<agent容器名>:8081/ask`；宿主机或浏览器访问应走你生成的 `8082/ask`。
 
 你写的业务 web app 如果需要其他页面或 API，也由 `server.js` 在 8082 中统一承载或转发。
 

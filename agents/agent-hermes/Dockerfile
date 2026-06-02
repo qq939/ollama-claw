@@ -77,6 +77,7 @@ CMD ["/bin/sh", "-lc", " \
     mkdir -p /home/agent/.hermes/workspace/project/logs; \
     /usr/sbin/sshd; \
     cp -f /usr/local/bin/start.sh /home/agent/.hermes/workspace/project/start.sh; \
+    sed -i 's/\r$//' /home/agent/.hermes/workspace/project/start.sh; \
     chmod +x /home/agent/.hermes/workspace/project/start.sh; \
     if [ -f /home/agent/.hermes/workspace/project/start.sh ] && [ -s /home/agent/.hermes/workspace/project/start.sh ]; then \
         chmod +x /home/agent/.hermes/workspace/project/start.sh; \
