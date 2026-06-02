@@ -8,7 +8,8 @@ const HOST = process.env.ASK_HOST || '0.0.0.0';
 const AGENT_KIND = process.env.AGENT_KIND || 'openclaw';
 const PROJECT_PATH = process.env.PROJECT_PATH || `/home/agent/.${AGENT_KIND}/workspace/project`;
 const LOG_PATH = process.env.LOG_PATH || path.join(PROJECT_PATH, 'logs/agent_tui.log');
-const TIMEOUT_MS = Number(process.env.ASK_TIMEOUT_MS || 120000);
+const TIMEOUT_MS = Number(process.env.ASK_TIMEOUT_MS || 1800000);
+let askQueue = Promise.resolve();
 
 function sendJson(res, status, data) {
   const body = JSON.stringify(data);
@@ -127,7 +128,7 @@ async function askClaude(message) {
 }
 
 async function askOpenClaw(message) {
-  return run('openclaw', ['agent', '--agent', 'main', '--message', message, '--timeout', '90']);
+  return run('openclaw', ['agent', '--agent', 'main', '--message', message, '--timeout', '1800']);
 }
 
 function defaultTarget() {
@@ -147,8 +148,13 @@ async function handleAsk(req, res, target = defaultTarget()) {
     sendJson(res, 400, { ok: false, error: 'message is required' });
     return;
   }
+  const prelogged = Boolean(body.prelogged);
   const timestamp = new Date().toISOString().replace('T', ' ').slice(0, 19);
-  appendLog(`\n[${timestamp}] $ ${message}\n[ask/${target}] ${timestamp}\n`);
+  if (prelogged) {
+    appendLog(`\n[ask/${target}] ${timestamp}\n`);
+  } else {
+    appendLog(`\n[${timestamp}] $ ${message}\n[ask/${target}] ${timestamp}\n`);
+  }
   const beforeLog = logSize();
   const result = target === 'openclaw' ? await askOpenClaw(message) : await askClaude(message);
   const processOutput = stripAnsi(`${result.stdout || ''}${result.stderr || ''}`);
@@ -167,6 +173,12 @@ async function handleAsk(req, res, target = defaultTarget()) {
   });
 }
 
+function enqueueAsk(req, res) {
+  askQueue = askQueue
+    .catch(() => {})
+    .then(() => handleAsk(req, res));
+}
+
 const server = http.createServer(async (req, res) => {
   const url = new URL(req.url, `http://${req.headers.host || 'localhost'}`);
   if (req.method === 'GET' && (url.pathname === '/health' || url.pathname === '/ask/health')) {
@@ -174,7 +186,7 @@ const server = http.createServer(async (req, res) => {
     return;
   }
   if (req.method === 'POST' && url.pathname === '/ask') {
-    await handleAsk(req, res);
+    enqueueAsk(req, res);
     return;
   }
   sendJson(res, 404, { ok: false, error: 'not found' });

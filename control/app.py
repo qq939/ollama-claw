@@ -1,8 +1,9 @@
-INITIAL_MESSAGE = "你负责的是完整的开发、测试、发现bug、变更的流程，项目是web app 8082（端口号），web app 8082所在的目录是/home/agent/.openclaw/workspace/project，如果project文件夹有web app，请查看启动脚本是否存在，/home/agent/.openclaw/workspace/project/user_start.sh。如果不存在启动脚本，请立即写好启动脚本user_start.sh，输出日志到当前目录下的logs/start.log。并且整理日志文件logs/agent_tui.log里的主要内容，梳理出项目构建的结构和细节，总结最后3轮对话的内容。项目所有惯例信息都在systemreadme.md中记载，最后更新项目README.md和项目SKILL.md"
+INITIAL_MESSAGE = "你负责的是完整的开发、测试、发现bug、变更的流程，项目是web app 8082（端口号），web app 8082所在的目录是/home/agent/.{agent}/workspace/project，如果project文件夹有web app，请查看启动脚本是否存在，/home/agent/.{agent}/workspace/project/user_start.sh。如果不存在启动脚本，请立即写好启动脚本user_start.sh，输出日志到当前目录下的logs/start.log。并且整理日志文件logs/agent_tui.log里的主要内容，梳理出项目构建的结构和细节，总结最后3轮对话的内容。项目所有惯例信息都在systemreadme.md中记载，最后更新项目README.md和项目SKILL.md"
 # Used in docker compose volume mount (docker-compose.yml) to bind frpc binary into containers.
 FRPC_PATH = "/Users/jimjiang/Downloads/frpc"
 import os
 import re
+import shlex
 import sys
 import time
 import json
@@ -27,6 +28,8 @@ END_HOST_PORT = CONTROL_BASE_PORT + 999
 # Used in create_agent (line 123) and API responses to enforce fixed in-container service port.
 SERVICE_PORT = 8082
 ASK_INTERNAL_PORT = 8081
+ASK_TIMEOUT_SECONDS = 30 * 60
+ASK_TIMEOUT_MS = ASK_TIMEOUT_SECONDS * 1000
 PROJECT_PATH = "/home/agent/.openclaw/workspace/project"
 SESSIONS_PATH = "/home/agent/.openclaw/projects"
 LOG_PATH = f"{PROJECT_PATH}/logs/agent_tui.log"
@@ -53,6 +56,18 @@ CLAUDE_DEFAULT_AUTH_TOKEN = os.environ.get("CLAUDE_ANTHROPIC_AUTH_TOKEN", "ollam
 
 def get_agent_paths(agent_type):
     return AGENT_PATHS.get(agent_type, AGENT_PATHS["openclaw@2026.2.9"])
+
+
+def agent_home_name(agent_type):
+    if agent_type == "claude@latest":
+        return "claude"
+    if agent_type == "hermes@latest":
+        return "hermes"
+    return "openclaw"
+
+
+def initial_message_for_agent_type(agent_type):
+    return INITIAL_MESSAGE.format(agent=agent_home_name(agent_type))
 
 # Used in API handlers (line 259, 300, 310) as default line count shown in each card.
 DEFAULT_TAIL_LINES = 200
@@ -311,6 +326,8 @@ def create_app(docker_client=None):
         env_vars = {
             "OPENCLAW_GATEWAY_HOST": os.environ.get("OPENCLAW_GATEWAY_HOST", "172.30.0.10"),
             "OPENCLAW_GATEWAY_PORT": os.environ.get("OPENCLAW_GATEWAY_PORT", "18790"),
+            "ASK_HOST": "0.0.0.0",
+            "ASK_TIMEOUT_MS": str(ASK_TIMEOUT_MS),
         }
         config_root = app.config["CONFIG_ROOT"]
         openclaw_path = os.path.join(config_root, spec["config_subdir"], "openclaw.json")
@@ -351,6 +368,8 @@ def create_app(docker_client=None):
         settings = read_json_file(os.path.join(cfg_dir, "settings.json"), {})
         config = read_json_file(os.path.join(cfg_dir, "config.json"), {})
         env_vars = {
+            "ASK_HOST": "0.0.0.0",
+            "ASK_TIMEOUT_MS": str(ASK_TIMEOUT_MS),
             "CLAUDE_CODE_TRUST_ALL": "true",
             "CLAUDE_CODE_SKIP_ONBOARDING": "true",
             "CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC": "1",
@@ -566,28 +585,207 @@ def create_app(docker_client=None):
         threading.Thread(target=run_pull, name=f"ollama-pull-{ollama_model}", daemon=True).start()
         return {"method": "ollama_http_api", "base_urls": ollama_base_urls(), "model": ollama_model, "started_at": started_at}
 
-    def restart_openclaw_gateway():
-        gateway = docker_client_or_default().containers.get(os.environ.get(GATEWAY_CONTAINER_ENV, "openclaw-gateway"))
-        gateway.restart()
-        return gateway.name
+    def config_home_for_agent_type(agent_type):
+        if agent_type == "claude@latest":
+            return "/home/agent/.claude"
+        if agent_type == "hermes@latest":
+            return "/home/agent/.hermes"
+        return "/home/agent/.openclaw"
 
-    def recreate_managed_agents_after_model_change():
-        recreated = []
-        errors = {}
-        gateway_token = ""
-        for c in managed_containers():
-            try:
-                payload = recreate_agent(c.name)
-                add_frpc_rule(payload["host_port"])
-                scp_rules_to_container(payload["container_name"], project_path_for_payload(payload))
-                recreated.append(payload)
-                if not gateway_token:
-                    gateway_token = openclaw_env(AGENT_SPECS[payload["agent_type"]]).get("OPENCLAW_GATEWAY_TOKEN", "")
-            except Exception as e:
-                errors[c.name] = str(e)
-        if gateway_token:
-            auto_pair_openclaw_client(gateway_token, timeout_seconds=20)
-        return recreated, errors
+    def exec_agent_node(container, script, env=None):
+        env = env or {}
+        env_parts = [f"{key}={shlex.quote(str(value))}" for key, value in env.items()]
+        command = " ".join(["env", *env_parts, "node", "-e", shlex.quote(script)])
+        result = container.exec_run(["/bin/sh", "-lc", command], user=AGENT_RUNTIME_USER)
+        output = result.output.decode("utf-8", errors="replace") if isinstance(result.output, bytes) else str(result.output)
+        if result.exit_code != 0:
+            raise RuntimeError(output.strip() or f"node exited with {result.exit_code}")
+        last_line = (output.strip().splitlines() or ["{}"])[-1]
+        try:
+            return json.loads(last_line)
+        except json.JSONDecodeError:
+            return {"output": output.strip()}
+
+    def read_container_model(container, agent_type):
+        home = config_home_for_agent_type(agent_type)
+        project_path = project_path_for_agent_type(agent_type)
+        if agent_type == "openclaw@2026.2.9":
+            script = r"""
+const fs = require("fs");
+const configPath = `${process.env.CONFIG_HOME}/openclaw.json`;
+let data = {};
+try { data = JSON.parse(fs.readFileSync(configPath, "utf8")); } catch {}
+const primary = data?.agents?.defaults?.model?.primary || "";
+console.log(JSON.stringify({ model: primary, config_path: configPath }));
+"""
+            return exec_agent_node(container, script, {"CONFIG_HOME": home})
+
+        script = r"""
+const fs = require("fs");
+const settingsPath = `${process.env.CONFIG_HOME}/settings.json`;
+let settings = {};
+try { settings = JSON.parse(fs.readFileSync(settingsPath, "utf8")); } catch {}
+const env = settings.env || {};
+const model = settings.primaryModel || env.ANTHROPIC_MODEL || env.OLLAMA_MODEL || "";
+console.log(JSON.stringify({ model, config_path: settingsPath, project_path: process.env.PROJECT_PATH }));
+"""
+        return exec_agent_node(container, script, {"CONFIG_HOME": home, "PROJECT_PATH": project_path})
+
+    def write_openclaw_container_model(container, agent_type, model_name):
+        primary_model, ollama_model = split_openclaw_model_name(model_name)
+        script = r"""
+const fs = require("fs");
+const path = require("path");
+const home = process.env.CONFIG_HOME;
+const configPath = path.join(home, "openclaw.json");
+const primaryModel = process.env.PRIMARY_MODEL;
+const ollamaModel = process.env.OLLAMA_MODEL;
+const projectPath = process.env.PROJECT_PATH;
+const readJson = (p) => {
+  try { return JSON.parse(fs.readFileSync(p, "utf8")); } catch { return {}; }
+};
+const writeJson = (p, value) => {
+  fs.mkdirSync(path.dirname(p), { recursive: true });
+  fs.writeFileSync(p, JSON.stringify(value, null, 2) + "\n");
+};
+const data = readJson(configPath);
+data.models = data.models || {};
+data.models.providers = data.models.providers || {};
+const provider = data.models.providers.ollama || {};
+provider.baseUrl = "http://ollama:11434/v1";
+provider.apiKey = provider.apiKey || "ollama-local";
+provider.api = "openai-completions";
+const models = Array.isArray(provider.models) ? provider.models : [];
+const byId = new Map(models.filter((m) => m && m.id).map((m) => [m.id, m]));
+const existing = byId.get(ollamaModel) || {};
+byId.set(ollamaModel, {
+  ...existing,
+  id: ollamaModel,
+  name: existing.name || ollamaModel,
+  reasoning: Boolean(existing.reasoning || false),
+  input: existing.input || ["text"],
+  cost: existing.cost || { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+  contextWindow: Number(existing.contextWindow || 32768),
+  maxTokens: Number(existing.maxTokens || 8192),
+});
+provider.models = Array.from(byId.values());
+data.models.providers.ollama = provider;
+data.agents = data.agents || {};
+data.agents.defaults = data.agents.defaults || {};
+data.agents.defaults.model = data.agents.defaults.model || {};
+data.agents.defaults.model.primary = primaryModel;
+data.agents.defaults.workspace = projectPath;
+writeJson(configPath, data);
+console.log(JSON.stringify({ config_path: configPath, model: primaryModel, ollama_model: ollamaModel }));
+"""
+        return exec_agent_node(container, script, {
+            "CONFIG_HOME": config_home_for_agent_type(agent_type),
+            "PRIMARY_MODEL": primary_model,
+            "OLLAMA_MODEL": ollama_model,
+            "PROJECT_PATH": project_path_for_agent_type(agent_type),
+        })
+
+    def write_claude_container_model(container, agent_type, model_name):
+        _, ollama_model = split_openclaw_model_name(model_name)
+        home = config_home_for_agent_type(agent_type)
+        project_path = project_path_for_agent_type(agent_type)
+        script = r"""
+const fs = require("fs");
+const path = require("path");
+const home = process.env.CONFIG_HOME;
+const projectPath = process.env.PROJECT_PATH;
+const model = process.env.OLLAMA_MODEL;
+const baseUrl = process.env.CLAUDE_BASE_URL || "http://ollama:11434";
+const token = process.env.CLAUDE_AUTH_TOKEN || "ollama";
+const providerId = "ollama-local";
+const readJson = (p) => {
+  try { return JSON.parse(fs.readFileSync(p, "utf8")); } catch { return {}; }
+};
+const writeJson = (p, value) => {
+  fs.mkdirSync(path.dirname(p), { recursive: true });
+  fs.writeFileSync(p, JSON.stringify(value, null, 2) + "\n");
+};
+const env = {
+  ANTHROPIC_BASE_URL: baseUrl,
+  ANTHROPIC_AUTH_TOKEN: token,
+  ANTHROPIC_API_KEY: token,
+  ANTHROPIC_MODEL: model,
+  ANTHROPIC_DEFAULT_HAIKU_MODEL: model,
+  ANTHROPIC_DEFAULT_OPUS_MODEL: model,
+  ANTHROPIC_DEFAULT_SONNET_MODEL: model,
+  OLLAMA_BASE_URL: process.env.OLLAMA_BASE_URL || "http://ollama:11434",
+  OLLAMA_MODEL: model,
+  API_TIMEOUT_MS: "3000000",
+  ANTHROPIC_DISABLE_PREFLIGHT: "1",
+  CLAUDE_CODE_TRUST_ALL: "true",
+  CLAUDE_CODE_SKIP_ONBOARDING: "true",
+  CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC: "1",
+};
+const settingsPath = path.join(home, "settings.json");
+const settings = readJson(settingsPath);
+Object.assign(settings, {
+  env,
+  primaryModel: model,
+  hasCompletedOnboarding: true,
+  hasTrustDialogAccepted: true,
+  hasCompletedProjectOnboarding: true,
+  trustedProjects: [projectPath],
+});
+writeJson(settingsPath, settings);
+const configPath = path.join(home, "config.json");
+const config = readJson(configPath);
+config.version = config.version || 2;
+config.permissions = config.permissions || [{ path: "/**", mode: ["read", "write"] }];
+config.claude = config.claude || {};
+config.claude.providers = config.claude.providers || {};
+config.claude.providers[providerId] = {
+  id: providerId,
+  name: "Ollama",
+  settingsConfig: { env },
+  websiteUrl: "https://ollama.com/library",
+  category: "local",
+  createdAt: Date.now(),
+  meta: { custom_endpoints: { [baseUrl]: { url: baseUrl, addedAt: Date.now() } } },
+};
+config.claude.current = providerId;
+for (const key of ["omo", "codex", "gemini", "opencode"]) config[key] = config[key] || { providers: {}, current: "" };
+config.mcp = config.mcp || { servers: {} };
+config.prompts = config.prompts || { claude: { prompts: {} }, codex: { prompts: {} }, gemini: { prompts: {} }, opencode: { prompts: {} } };
+config.skills = config.skills || { skills: {}, repos: [] };
+config.common_config_snippets = config.common_config_snippets || {};
+writeJson(configPath, config);
+console.log(JSON.stringify({ settings_path: settingsPath, config_path: configPath, model, base_url: baseUrl }));
+"""
+        return exec_agent_node(container, script, {
+            "CONFIG_HOME": home,
+            "PROJECT_PATH": project_path,
+            "OLLAMA_MODEL": ollama_model,
+            "CLAUDE_BASE_URL": os.environ.get("CLAUDE_ANTHROPIC_BASE_URL", CLAUDE_DEFAULT_BASE_URL),
+            "CLAUDE_AUTH_TOKEN": os.environ.get("CLAUDE_ANTHROPIC_AUTH_TOKEN", CLAUDE_DEFAULT_AUTH_TOKEN),
+            "OLLAMA_BASE_URL": os.environ.get("OLLAMA_BASE_URL", "http://ollama:11434"),
+        })
+
+    def apply_model_to_container(container, agent_type, model_name, restart=True):
+        primary_model, ollama_model = split_openclaw_model_name(model_name)
+        pull_info = pull_ollama_model_async(ollama_model)
+        if agent_type == "openclaw@2026.2.9":
+            config_info = write_openclaw_container_model(container, agent_type, primary_model)
+        elif agent_type in ("claude@latest", "hermes@latest"):
+            config_info = write_claude_container_model(container, agent_type, ollama_model)
+        else:
+            raise ValueError(f"Unsupported agent type: {agent_type}")
+        restarted = False
+        if restart:
+            container.restart()
+            restarted = True
+        return {
+            "model": primary_model if agent_type == "openclaw@2026.2.9" else ollama_model,
+            "ollama_model": ollama_model,
+            "config": config_info,
+            "ollama_pull": pull_info,
+            "restarted": restarted,
+            "updated_at": now_iso(),
+        }
 
     def auto_pair_openclaw_client(token, timeout_seconds=20):
         if not token:
@@ -685,15 +883,15 @@ console.log(count);
                 env[k] = v
         return env
 
-    def send_agent_message(container, message):
+    def send_agent_message(container, message, prelogged=False):
         labels = ((getattr(container, "attrs", {}) or {}).get("Config", {}) or {}).get("Labels", {}) or (getattr(container, "labels", {}) or {})
         agent_type = labels.get("hermit.agent_type") or "openclaw@2026.2.9"
-        msg_to_send = message or INITIAL_MESSAGE
-        payload = json.dumps({"message": msg_to_send}, ensure_ascii=False).encode("utf-8")
+        msg_to_send = message or initial_message_for_agent_type(agent_type)
+        payload = json.dumps({"message": msg_to_send, "prelogged": bool(prelogged)}, ensure_ascii=False).encode("utf-8")
         url = f"http://{container.name}:{ASK_INTERNAL_PORT}/ask"
         req = urllib.request.Request(url, data=payload, headers={"Content-Type": "application/json"}, method="POST")
         try:
-            with urllib.request.urlopen(req, timeout=140) as resp:
+            with urllib.request.urlopen(req, timeout=ASK_TIMEOUT_SECONDS) as resp:
                 raw = resp.read().decode("utf-8", errors="replace")
                 return json.loads(raw) if raw else {"ok": True, "agent_type": agent_type}
         except urllib.error.HTTPError as e:
@@ -704,13 +902,23 @@ console.log(count);
                 data = {"error": raw or str(e)}
             raise RuntimeError(data.get("error") or data.get("output") or str(e))
 
+    def send_agent_message_background(container_name, message, prelogged=False):
+        def run():
+            try:
+                container = docker_client_or_default().containers.get(container_name)
+                send_agent_message(container, message, prelogged=prelogged)
+            except Exception as e:
+                print(f"[send-message/background] {container_name} failed: {e}", flush=True, file=sys.stderr)
+
+        threading.Thread(target=run, name=f"send-message-{container_name}", daemon=True).start()
+
     def append_user_log(container, message):
         labels = ((getattr(container, "attrs", {}) or {}).get("Config", {}) or {}).get("Labels", {}) or (getattr(container, "labels", {}) or {})
         agent_type = labels.get("hermit.agent_type") or "openclaw@2026.2.9"
         log_path = log_path_for_agent_type(agent_type)
         logs_path = os.path.dirname(log_path)
         ts = datetime.now(timezone(timedelta(hours=8))).strftime("%Y-%m-%d %H:%M:%S")
-        safe = (message or INITIAL_MESSAGE).replace("'", "'\"'\"'")
+        safe = (message or initial_message_for_agent_type(agent_type)).replace("'", "'\"'\"'")
         container.exec_run(["/bin/sh", "-c", f"mkdir -p '{logs_path}' && echo '[{ts}] $ {safe}' >> '{log_path}'"], user=AGENT_RUNTIME_USER)
 
     def clean_log_text(text):
@@ -855,11 +1063,12 @@ console.log(count);
             if agent_type == "openclaw@2026.2.9":
                 auto_pair_openclaw_client(gateway_token)
             user_msg = (body.get("message") or "").strip()
-            msg_to_send = user_msg or INITIAL_MESSAGE
+            msg_to_send = user_msg or initial_message_for_agent_type(agent_type)
             try:
-                send_agent_message(container, msg_to_send)
+                append_user_log(container, msg_to_send)
             except Exception as e:
-                print(f"[send-message] initial send failed: {e}", flush=True, file=sys.stderr)
+                print(f"[send-message] initial log failed: {e}", flush=True, file=sys.stderr)
+            send_agent_message_background(container.name, msg_to_send, prelogged=True)
 
         else:
             time.sleep(3)
@@ -1323,16 +1532,56 @@ console.log(count);
             container = _require_managed(name)
             labels = ((getattr(container, "attrs", {}) or {}).get("Config", {}) or {}).get("Labels", {}) or (getattr(container, "labels", {}) or {})
             agent_type = labels.get("hermit.agent_type", "")
-            msg_to_send = message or INITIAL_MESSAGE
+            msg_to_send = message or initial_message_for_agent_type(agent_type)
             try:
-                result = send_agent_message(container, msg_to_send)
+                append_user_log(container, msg_to_send)
             except Exception as e:
                 return jsonify({"error": str(e)}), 500
-            return jsonify({"ok": True, "container_name": name, "message": message, "agent_type": agent_type, "result": result, "sent_at": now_iso()})
+            send_agent_message_background(container.name, msg_to_send, prelogged=True)
+            return jsonify({"ok": True, "background": True, "container_name": name, "message": message, "agent_type": agent_type, "sent_at": now_iso()}), 202
         except PermissionError as e:
             return jsonify({"error": str(e)}), 403
         except docker.errors.NotFound:
             return jsonify({"error": "Container not found"}), 404
+        except Exception as e:
+            return jsonify({"error": str(e)}), 500
+
+    @app.get("/api/agents/<path:name>/model")
+    def api_get_agent_model(name):
+        try:
+            container = _require_managed(name)
+            labels = ((getattr(container, "attrs", {}) or {}).get("Config", {}) or {}).get("Labels", {}) or (getattr(container, "labels", {}) or {})
+            agent_type = labels.get("hermit.agent_type", "")
+            if agent_type not in AGENT_SPECS:
+                return jsonify({"error": f"Unsupported agent type: {agent_type}"}), 400
+            info = read_container_model(container, agent_type)
+            return jsonify({"ok": True, "container_name": name, "agent_type": agent_type, **info})
+        except PermissionError as e:
+            return jsonify({"error": str(e)}), 403
+        except docker.errors.NotFound:
+            return jsonify({"error": "Container not found"}), 404
+        except Exception as e:
+            return jsonify({"error": str(e)}), 500
+
+    @app.post("/api/agents/<path:name>/model")
+    def api_update_agent_model(name):
+        body = request.get_json(silent=True) or {}
+        model_name = (body.get("model") or "").strip()
+        restart = bool(body.get("restart", True))
+        try:
+            container = _require_managed(name)
+            labels = ((getattr(container, "attrs", {}) or {}).get("Config", {}) or {}).get("Labels", {}) or (getattr(container, "labels", {}) or {})
+            agent_type = labels.get("hermit.agent_type", "")
+            payload = apply_model_to_container(container, agent_type, model_name, restart=restart)
+            return jsonify({"ok": True, "container_name": name, "agent_type": agent_type, **payload})
+        except ValueError as e:
+            return jsonify({"error": str(e)}), 400
+        except PermissionError as e:
+            return jsonify({"error": str(e)}), 403
+        except docker.errors.NotFound:
+            return jsonify({"error": "Container not found"}), 404
+        except docker.errors.APIError as e:
+            return jsonify({"error": f"Docker API error: {str(e)}"}), 500
         except Exception as e:
             return jsonify({"error": str(e)}), 500
 
@@ -1501,12 +1750,13 @@ console.log(count);
             import time
             time.sleep(8)
             scp_rules_to_container(payload["container_name"], project_path_for_payload(payload))
-            default_msg = INITIAL_MESSAGE
+            default_msg = initial_message_for_agent_type(agent_type)
             try:
                 container_new = docker_client_or_default().containers.get(payload["container_name"])
-                send_agent_message(container_new, default_msg)
+                append_user_log(container_new, default_msg)
             except Exception as e:
-                print(f"[recreate] send initial message failed: {e}", flush=True, file=sys.stderr)
+                print(f"[recreate] initial log failed: {e}", flush=True, file=sys.stderr)
+            send_agent_message_background(payload["container_name"], default_msg, prelogged=True)
             return jsonify(payload)
         except ValueError as e:
             return jsonify({"error": str(e)}), 400
@@ -1583,17 +1833,13 @@ console.log(count);
 
     @app.post("/api/openclaw/model")
     def api_update_openclaw_model():
-        """更新 OpenClaw 默认模型配置，触发 Ollama 拉取，并重建运行中的 agent 容器"""
+        """更新默认模板模型配置并触发 Ollama 拉取；不再部署到运行中的 agent 容器。"""
         body = request.get_json(silent=True) or {}
         model_name = (body.get("model") or "").strip()
         try:
             model_info = upsert_openclaw_ollama_model(model_name)
             claude_info = upsert_claude_ollama_model(model_name)
             pull_info = pull_ollama_model_async(model_info["ollama_model"])
-            restarted_gateway = restart_openclaw_gateway()
-            # Give the gateway a moment to reload config before agents reconnect.
-            time.sleep(3)
-            recreated_agents, errors = recreate_managed_agents_after_model_change()
 
             return jsonify({
                 "ok": True,
@@ -1602,9 +1848,8 @@ console.log(count);
                 "config_path": model_info["config_path"],
                 "claude": claude_info,
                 "ollama_pull": pull_info,
-                "restarted_gateway": restarted_gateway,
-                "recreated_agents": recreated_agents,
-                "recreation_errors": errors,
+                "deployed_to_agents": False,
+                "message": "Updated template configs only. Apply models from each agent card to modify and restart that container.",
                 "updated_at": now_iso(),
             })
         except ValueError as e:
@@ -1881,6 +2126,29 @@ console.log(count);
         margin-top: 8px;
         display: none;
       }}
+      .agent-model-inline {{
+        display: flex;
+        align-items: center;
+        gap: 6px;
+        min-width: 0;
+      }}
+      .agent-model-name {{
+        color: #3AE374;
+        cursor: pointer;
+        max-width: 180px;
+        overflow: hidden;
+        text-overflow: ellipsis;
+        white-space: nowrap;
+      }}
+      .agent-model-name:hover {{
+        text-decoration: underline;
+      }}
+      .agent-model-select {{
+        max-width: 220px;
+        padding: 2px 4px;
+        font-size: 11px;
+        display: none;
+      }}
     </style>
   </head>
   <body>
@@ -1900,10 +2168,10 @@ console.log(count);
         </div>
         <div class="model-panel">
           <div class="model-section">
-            <div class="model-section-title"><a href="https://ollama.com/library" target="_blank" class="model-link-btn" title="浏览 Ollama 模型库 (opens in new tab)">🤖 模型管理 🌐</a></div>
+            <div class="model-section-title"><a href="https://ollama.com/library" target="_blank" class="model-link-btn" title="浏览 Ollama 模型库 (opens in new tab)">🤖 Ollama 模型库 🌐</a></div>
             <div class="model-info">
               <div style="margin-bottom: 8px;">
-                <span style="color: var(--muted);">当前 OpenClaw 模型：</span>
+                <span style="color: var(--muted);">默认模板模型：</span>
                 <span id="currentModel" style="color: #3AE374; font-weight: 600;">加载中...</span>
                 <span id="modelStatus" class="model-status"></span>
               </div>
@@ -1918,7 +2186,6 @@ console.log(count);
               </div>
               <div class="model-row">
                 <input id="modelName" placeholder="输入模型名称（如 qwen2.5:0.5b）" style="min-width: 240px;" />
-                <button id="deployModelBtn" style="background: #3AE374; color: #000;">提交并部署</button>
                 <button id="pullModelBtn" style="background: #2196F3; color: #fff;">下载模型到 Ollama</button>
                 <button id="refreshModelsBtn">刷新模型列表</button>
               </div>
@@ -1940,6 +2207,7 @@ console.log(count);
       const notice = document.getElementById("notice");
       const tail = 20;
       const previewBase = "{preview_base}";
+      let ollamaModelsCache = [];
 
       function showModal(title, content) {{
         const overlay = document.createElement("div");
@@ -2005,6 +2273,7 @@ console.log(count);
             modelList.innerHTML = `<div style="color: #FF4D4D;">错误: ${{data.error}}</div>`;
             return;
           }}
+          ollamaModelsCache = data.models || [];
           if (!data.models || data.models.length === 0) {{
             modelList.innerHTML = '<div style="color: #FFC048;">Ollama 中没有已安装的模型</div>';
             return;
@@ -2042,55 +2311,6 @@ console.log(count);
             el.classList.add("selected");
           }}
         }});
-      }}
-
-      async function deployModel() {{
-        const selectedModel = document.querySelector(".model-item.selected");
-        if (!selectedModel) {{
-          alert("请从列表中选择模型");
-          return;
-        }}
-        const modelName = selectedModel.dataset.model;
-        const status = document.getElementById("modelStatus");
-        const pullLogs = document.getElementById("pullLogs");
-        status.textContent = "提交中...";
-        status.className = "model-status pulling";
-        pullLogs.style.display = "block";
-        pullLogs.textContent = `提交模型部署: ${{modelName}}\n- 更新 OpenClaw 配置\n- 向 Ollama 发送下载指令\n- 重启 gateway\n- 重建 agent 容器\n`;
-        try {{
-          const res = await fetch("/api/openclaw/model/deploy", {{
-            method: "POST",
-            headers: {{ "Content-Type": "application/json" }},
-            body: JSON.stringify({{ model: modelName }}),
-          }});
-          const data = await res.json();
-          if (!res.ok) {{
-            status.textContent = "错误: " + (data.error || "未知错误");
-            status.className = "model-status error";
-            pullLogs.textContent += "错误: " + (data.error || "未知错误") + "\\n";
-            return;
-          }}
-          status.textContent = "✓ 已提交部署";
-          status.className = "model-status";
-          document.getElementById("currentModel").textContent = data.model || modelName;
-          pullLogs.textContent += `已写入配置: ${{data.model}}\n`;
-          pullLogs.textContent += `Ollama 下载: ${{data.ollama_model}}\n`;
-          pullLogs.textContent += `已重启 gateway: ${{data.restarted_gateway}}\n`;
-          pullLogs.textContent += `已重建 agent: ${{(data.recreated_agents || []).map(x => x.container_name || x).join(", ") || "无"}}\n`;
-          if (data.recreation_errors && Object.keys(data.recreation_errors).length) {{
-            pullLogs.textContent += `重建错误: ${{JSON.stringify(data.recreation_errors)}}\n`;
-          }}
-          await refreshCards();
-          await loadOllamaModels();
-          setTimeout(checkPullStatus, 5000);
-          setTimeout(() => {{
-            status.textContent = "";
-          }}, 5000);
-        }} catch (e) {{
-          status.textContent = "错误: " + e.message;
-          status.className = "model-status error";
-          pullLogs.textContent += "错误: " + e.message + "\\n";
-        }}
       }}
 
       async function pullModel() {{
@@ -2206,7 +2426,6 @@ console.log(count);
       // 初始化时立即检查状态
       checkPullStatus();
 
-      document.getElementById("deployModelBtn").onclick = deployModel;
       document.getElementById("pullModelBtn").onclick = pullModel;
       document.getElementById("refreshModelsBtn").onclick = async () => {{
         await loadCurrentModel();
@@ -2246,7 +2465,15 @@ console.log(count);
                     </select>
                   </div>
                 </div>
-                <div class="meta">${{item.agent_type}} · ${{item.host_port}}:{SERVICE_PORT} · SSH:${{item.ssh_port}}</div>
+                <div class="meta" style="display:flex;align-items:center;gap:8px;flex-wrap:wrap;">
+                  <span>${{item.agent_type}} · ${{item.host_port}}:{SERVICE_PORT} · SSH:${{item.ssh_port}}</span>
+                  <span class="agent-model-inline">
+                    <span data-role="agent-model-name" class="agent-model-name" title="点击切换模型">模型: 加载中</span>
+                    <select data-role="agent-model-select" class="agent-model-select">
+                      <option value="">加载中...</option>
+                    </select>
+                  </span>
+                </div>
               </div>
             </div>
             <div class="meta ${{stCls}}" data-status="${{item.status}}" data-port="${{item.host_port}}">${{item.status}}</div>
@@ -2331,18 +2558,93 @@ console.log(count);
           logBox.textContent += `\\n(recreated) ${{d.container_name}}\\n`;
           await refreshCards();
         }};
+        const agentModelName = div.querySelector('[data-role="agent-model-name"]');
+        const agentModelSelect = div.querySelector('[data-role="agent-model-select"]');
+        const renderAgentModelOptions = (currentModel = "") => {{
+          agentModelSelect.innerHTML = "";
+          const placeholder = document.createElement("option");
+          placeholder.value = "";
+          placeholder.textContent = ollamaModelsCache.length ? "选择模型..." : "无 Ollama 模型";
+          agentModelSelect.appendChild(placeholder);
+          for (const model of ollamaModelsCache) {{
+            const name = model.name || "";
+            if (!name) continue;
+            const option = document.createElement("option");
+            option.value = name;
+            option.textContent = `${{name}} (${{formatSize(model.size)}})`;
+            if (name === currentModel || `ollama/${{name}}` === currentModel) option.selected = true;
+            agentModelSelect.appendChild(option);
+          }}
+        }};
+        const setAgentModelLabel = (model = "") => {{
+          const clean = model ? model.replace(/^ollama\\//, "") : "未设置";
+          agentModelName.textContent = "模型: " + clean;
+          agentModelName.title = "点击切换模型: " + clean;
+        }};
+        setAgentModelLabel("");
+        renderAgentModelOptions("");
+        fetch(`/api/agents/${{encodeURIComponent(item.container_name)}}/model`, {{ cache: "no-store" }})
+          .then(r => r.ok ? r.json() : null)
+          .then(d => {{
+            if (!d || !d.model) return;
+            setAgentModelLabel(d.model);
+            renderAgentModelOptions(d.model);
+          }})
+          .catch(() => {{}});
+        agentModelName.onclick = async () => {{
+          if (!ollamaModelsCache.length) {{
+            await loadOllamaModels();
+          }}
+          renderAgentModelOptions(agentModelSelect.value || agentModelName.textContent.replace(/^模型:\\s*/, ""));
+          agentModelSelect.style.display = "inline-block";
+          agentModelSelect.focus();
+        }};
+        agentModelSelect.onblur = () => {{
+          setTimeout(() => {{
+            if (!agentModelSelect.matches(":focus")) agentModelSelect.style.display = "none";
+          }}, 150);
+        }};
+        agentModelSelect.onchange = async () => {{
+          const modelName = (agentModelSelect.value || "").trim();
+          if (!modelName) {{
+            return;
+          }}
+          agentModelSelect.style.display = "none";
+          setAgentModelLabel("应用中...");
+          logBox.textContent += `\\n[模型] 拉取并应用到本容器: ${{modelName}}\\n`;
+          const r = await fetch(`/api/agents/${{encodeURIComponent(item.container_name)}}/model`, {{
+            method: "POST",
+            headers: {{ "Content-Type": "application/json" }},
+            body: JSON.stringify({{ model: modelName, restart: true }}),
+          }});
+          const d = await r.json();
+          if (!r.ok) {{
+            logBox.textContent += `ERROR: ${{d.error || `HTTP ${{r.status}}`}}\\n`;
+            return;
+          }}
+          logBox.textContent += `[模型] 已写入配置并重启容器: ${{d.model || modelName}}\\n`;
+          if (d.ollama_pull) {{
+            logBox.textContent += `[模型] Ollama 拉取任务已启动: ${{d.ollama_pull.model || modelName}}\\n`;
+          }}
+          setAgentModelLabel(d.model || modelName);
+          document.getElementById("modelName").value = d.ollama_model || modelName;
+          setTimeout(checkPullStatus, 1000);
+          setTimeout(refreshCards, 2500);
+        }};
         div.querySelector('button[data-action="init"]').onclick = async () => {{
+          logBox.textContent += `\n(初始消息已提交，后台发送中...)\n`;
+          logBox.scrollTop = logBox.scrollHeight;
           const r = await fetch(`/api/agents/${{encodeURIComponent(item.container_name)}}/send-message`, {{
             method: "POST",
             headers: {{ "Content-Type": "application/json" }},
-            body: JSON.stringify({{ message: "" }}),
+            body: JSON.stringify({{ message: "", background: true }}),
           }});
           if (!r.ok) {{
             const d = await r.json();
             logBox.textContent += `\\nERROR: ${{d.error || `HTTP ${{r.status}}`}}\\n`;
             return;
           }}
-          logBox.textContent += `\n(已发送初始消息)\n`;
+          logBox.textContent += `\n(初始消息已进入后台队列)\n`;
         }};
         div.querySelector('button[data-action="cleanup-context"]').onclick = async () => {{
           const r = await fetch(`/api/agents/${{encodeURIComponent(item.container_name)}}/cleanup-context`, {{ method: "POST" }});
@@ -2440,11 +2742,13 @@ console.log(count);
           const r = await fetch(`/api/agents/${{encodeURIComponent(item.container_name)}}/send-message`, {{
             method: "POST",
             headers: {{ "Content-Type": "application/json" }},
-            body: JSON.stringify({{ message: msg }}),
+            body: JSON.stringify({{ message: msg, background: true }}),
           }});
           if (!r.ok) {{
             const d = await r.json();
             window.cardStates[item.container_name] += `ERROR: ${{d.error || `HTTP ${{r.status}}`}}\\n`;
+          }} else {{
+            window.cardStates[item.container_name] += `(消息已记录，AI 后台处理中)\\n`;
           }}
           logBox.textContent = window.cardStates[item.container_name];
           logBox.scrollTop = logBox.scrollHeight;
