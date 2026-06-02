@@ -99,20 +99,17 @@ curl -X POST http://localhost:18080/api/agents/18081-my-agent/command \
   -d '{"command": "ls -la /workspace"}'
 ```
 
-### 5. 通过容器 Ask 接口提问
+### 5. Agent Ask 框架
 
-每个 Agent 容器都会暴露统一的 `/ask` 接口。宿主机访问时使用控制面板分配的 Agent 端口：
+每个 Agent 容器都会内置底层 ask 服务，监听容器内部 `127.0.0.1:8081/ask`。控制面板的 `/api/agents/{container_name}/send-message` 会通过 Docker 网络直接调用这个内部接口。
 
 ```bash
-curl -X POST http://localhost:18081/ask \
+curl -X POST http://<agent-container-name>:8081/ask \
   -H "Content-Type: application/json" \
   -d '{"message": "你好啊"}'
-
-# 健康检查
-curl http://localhost:18081/ask/health
 ```
 
-容器内部是两层结构：底层 `ask_server.js` 监听 `127.0.0.1:8081/ask`，负责调用 Claude 或 OpenClaw；主程序 `server.js` 监听 `0.0.0.0:8082/ask`，并转发到 `8081/ask`。控制面板的 `/api/agents/{container_name}/send-message` 也会通过这个中间层调用 Agent。
+对外的 `8082/ask` 不由基础镜像预置实现，而是由容器内 AI 按 `systemreadme.md` 生成主程序 `server.js`：`server.js` 监听 `0.0.0.0:8082`，并把 `/ask` 转发到内部 `127.0.0.1:8081/ask`。
 
 请求体支持 `message`、`prompt` 或 `text` 字段；响应包含 `ok`、`agent`、`target`、`exit_code` 和 `output`。
 
@@ -322,4 +319,4 @@ docker-compose up -d --build
 1. Agent 使用资源限制：16GB 内存 + 8GB 共享内存
 2. 日志文件限制：500MB 大小，最多 2 个文件轮转
 3. 端口范围：Agent 分配端口为 `CONTROL_BASE_PORT + 1` 到 `CONTROL_BASE_PORT + 999`，默认是 `18081-19079`；当前 `.env` 示例是 `20001-20999`
-4. 容器内 `8082` 由主程序 `server.js` 占用并提供 `/ask`；底层 `ask_server.js` 使用 `8081`；工作区 web app 默认请使用 `APP_PORT` 或 `3000`
+4. 容器内底层 `ask_server.js` 使用 `8081`；`8082` 留给容器内 AI 生成的主程序 `server.js`，其中 `/ask` 应转发到 `127.0.0.1:8081/ask`

@@ -26,6 +26,7 @@ START_HOST_PORT = CONTROL_BASE_PORT + 1
 END_HOST_PORT = CONTROL_BASE_PORT + 999
 # Used in create_agent (line 123) and API responses to enforce fixed in-container service port.
 SERVICE_PORT = 8082
+ASK_INTERNAL_PORT = 8081
 PROJECT_PATH = "/home/agent/.openclaw/workspace/project"
 SESSIONS_PATH = "/home/agent/.openclaw/projects"
 LOG_PATH = f"{PROJECT_PATH}/logs/agent_tui.log"
@@ -689,7 +690,7 @@ console.log(count);
         agent_type = labels.get("hermit.agent_type") or "openclaw@2026.2.9"
         msg_to_send = message or INITIAL_MESSAGE
         payload = json.dumps({"message": msg_to_send}, ensure_ascii=False).encode("utf-8")
-        url = f"http://{container.name}:{SERVICE_PORT}/ask"
+        url = f"http://{container.name}:{ASK_INTERNAL_PORT}/ask"
         req = urllib.request.Request(url, data=payload, headers={"Content-Type": "application/json"}, method="POST")
         try:
             with urllib.request.urlopen(req, timeout=140) as resp:

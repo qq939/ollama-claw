@@ -59,13 +59,11 @@ ENV AGENT_KIND=hermes
 ENV PROJECT_PATH=/home/agent/.hermes/workspace/project
 ENV LOG_PATH=/home/agent/.hermes/workspace/project/logs/agent_tui.log
 ENV ASK_PORT=8081
-ENV SERVER_PORT=8082
 COPY --chown=501:20 ask_server.js /usr/local/bin/ask_server.js
-COPY --chown=501:20 server.js /usr/local/bin/server.js
 COPY --chown=501:20 start.sh /usr/local/bin/start.sh
 
 WORKDIR /home/agent/.hermes/workspace/project
-EXPOSE 8082
+EXPOSE 8081 8082
 
 CMD ["/bin/sh", "-lc", " \
     mkdir -p \"$HOME/.hermes\"; \

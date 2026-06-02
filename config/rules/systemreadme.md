@@ -28,8 +28,12 @@
 3. 启动脚本（重要！）
    /home/agent/.claude/workspace/project/user_start.sh
 
-   如果存在且非空，容器启动时会自动执行。
-   你应该将项目的启动命令写入此文件：
+   你只能创建或修改 user_start.sh 来管理业务应用启动。
+   不允许修改 start.sh。start.sh 是平台框架脚本，负责启动内部 ask_server.js
+   并调用 user_start.sh；改动 start.sh 会破坏容器启动链路。
+
+   如果 user_start.sh 存在且非空，容器启动时会由 start.sh 自动执行。
+   你应该将项目的启动命令写入 user_start.sh：
      示例：
        #!/bin/bash
        cd /home/agent/.claude/workspace/project
@@ -80,13 +84,16 @@
 三、配置注入机制（自动执行，Agent 无需干预）
 ================================================================================
 
-容器 CMD 启动时会自动执行以下配置注入：
+容器 CMD 启动时会自动执行以下配置注入与框架启动：
 
   1) 复制 /agent-config/* 到 ~/.claude/（跳过 /agent-config/workspace）
   2) 启动 SSH 服务（端口 22）
   3) 生成 ~/.claude/settings.json，设置 trustedProjects、hasCompletedOnboarding 等字段
-  4) 如果存在 user_start.sh，执行它并后台运行
-  5) 如果是 ollama 类型，启动 ollama serve 并拉取 OLLAMA_MODEL 模型
+  4) 将平台内置 start.sh 放入项目目录并执行它
+  5) start.sh 启动内部 ask_server.js（127.0.0.1:8081/ask）
+  6) 如果存在 user_start.sh，start.sh 会执行它并后台运行
+
+重要约束：Agent 只能修改 user_start.sh，不能修改 start.sh。
 
 ================================================================================
 四、Agent 类型与路径差异
@@ -108,11 +115,11 @@
 
 容器内主程序固定暴露端口：8082
 
-`server.js` 监听 `0.0.0.0:8082`，对外只暴露统一入口 `/ask`。`server.js` 的 `/ask` 必须转发到内部 `ask_server.js` 的 `/ask`，也就是 `http://127.0.0.1:8081/ask`。
+你需要在工作目录里生成主程序 `server.js`，监听 `0.0.0.0:8082`。`server.js` 的 `/ask` 必须转发到内部 `ask_server.js` 的 `/ask`，也就是 `http://127.0.0.1:8081/ask`。
 
-`ask_server.js` 监听 `127.0.0.1:8081`，只处理底层 Agent 调用，不直接对宿主机暴露。不要让控制面板或外部调用绕过 `server.js` 直接访问 `8081/ask`。
+基础容器已经提供 `ask_server.js`，它监听 `127.0.0.1:8081`，只处理底层 Agent 调用。控制面板内部发消息会直接调用 `8081/ask`；宿主机或浏览器访问应走你生成的 `8082/ask`。
 
-你写的业务 web app 不要直接占用 8082。默认请监听 `APP_PORT` 或 `3000`，需要对外暴露时由 `server.js` 增加转发。
+你写的业务 web app 如果需要其他页面或 API，也由 `server.js` 在 8082 中统一承载或转发。
 
 容器统一 ask 接口：
 
@@ -220,7 +227,7 @@ claude 类型可在 /agent-config/settings.json 和 config.json 中配置：
 ================================================================================
 
 1. 检查项目目录是否已有代码
-2. 如无启动脚本，立即创建 user_start.sh
+2. 如无业务启动脚本，立即创建 user_start.sh；不要修改 start.sh
 3. 开发/调试完成后，更新 README.md 和 SKILL.md
 4. 整理 logs/agent_tui.log 的关键内容
 5. 每次会话结束时总结最后3轮对话的内容
