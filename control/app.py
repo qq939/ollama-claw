@@ -214,16 +214,19 @@ def create_app(docker_client=None):
         items = []
         control_name = f"control-{CONTROL_BASE_PORT}"
         excluded = {control_name, "openclaw-gateway", "ollama", "ollama-claw-agent-image-openclaw-1"}
+        excluded_services = {"agent-image-openclaw", "agent-image-claude", "agent-image-hermes"}
         network_name = "ollama-claw_ollama-claw-network"
         for c in all_containers():
             container_networks = (c.attrs.get("NetworkSettings", {}).get("Networks", {}) or {}).keys()
             in_target_network = any(network_name in n for n in container_networks)
+            if c.name.endswith("-template"):
+                continue
             if is_managed(c):
                 if in_target_network:
                     items.append(c)
                 continue
             svc = (((getattr(c, "attrs", {}) or {}).get("Config", {}) or {}).get("Labels", {}) or {}).get("com.docker.compose.service") or ""
-            if is_compose_member(c) and c.name not in excluded and svc != "agent-image-openclaw" and c.name.startswith("ollama-claw-agent-"):
+            if is_compose_member(c) and c.name not in excluded and svc not in excluded_services and c.name.startswith("ollama-claw-agent-"):
                 items.append(c)
         return sorted(items, key=lambda c: c.name)
 
@@ -822,6 +825,18 @@ const writeJson = (p, value) => {
 const pending = readJson(pendingPath);
 const paired = readJson(pairedPath);
 const now = Date.now();
+const isAlreadyPaired = Object.values(paired).some((entry) => {
+  if (!entry || !entry.tokens) return false;
+  return Object.values(entry.tokens).some((tokenInfo) => {
+    if (!tokenInfo || tokenInfo.token !== token) return false;
+    const scopes = Array.isArray(tokenInfo.scopes) ? tokenInfo.scopes : [];
+    return scopes.includes("operator.pairing") || scopes.includes("operator.admin");
+  });
+});
+if (isAlreadyPaired && Object.keys(pending).length === 0) {
+  console.log("paired");
+  process.exit(0);
+}
 let count = 0;
 for (const [requestId, req] of Object.entries(pending)) {
   if (!req || !["gateway-client", "cli"].includes(req.clientId)) continue;
@@ -869,6 +884,8 @@ console.log(count);
                 output = result.output.decode("utf-8", errors="replace").strip() if isinstance(result.output, bytes) else str(result.output).strip()
                 approved_count = 0
                 if result.exit_code == 0 and output.splitlines():
+                    if output.splitlines()[-1] == "paired":
+                        return True
                     try:
                         approved_count = int(output.splitlines()[-1])
                     except ValueError:
@@ -897,17 +914,39 @@ console.log(count);
         msg_to_send = message or initial_message_for_agent_type(agent_type)
         payload = json.dumps({"message": msg_to_send, "prelogged": bool(prelogged)}, ensure_ascii=False).encode("utf-8")
         url = f"http://{container.name}:{ASK_INTERNAL_PORT}/ask"
-        req = urllib.request.Request(url, data=payload, headers={"Content-Type": "application/json"}, method="POST")
-        try:
+        env = container_env(container)
+        gateway_token = env.get("OPENCLAW_GATEWAY_TOKEN", "")
+
+        def post_once():
+            req = urllib.request.Request(url, data=payload, headers={"Content-Type": "application/json"}, method="POST")
             with urllib.request.urlopen(req, timeout=ASK_TIMEOUT_SECONDS) as resp:
                 raw = resp.read().decode("utf-8", errors="replace")
                 return json.loads(raw) if raw else {"ok": True, "agent_type": agent_type}
+
+        if agent_type == "openclaw@2026.2.9":
+            threading.Thread(
+                target=lambda: auto_pair_openclaw_client(gateway_token, timeout_seconds=ASK_TIMEOUT_SECONDS),
+                name=f"openclaw-pairing-{container.name}",
+                daemon=True,
+            ).start()
+
+        try:
+            data = post_once()
+            output = str(data.get("output") or data.get("error") or "")
+            if agent_type == "openclaw@2026.2.9" and "pairing required" in output:
+                auto_pair_openclaw_client(gateway_token, timeout_seconds=20)
+                data = post_once()
+            return data
         except urllib.error.HTTPError as e:
             raw = e.read().decode("utf-8", errors="replace")
             try:
                 data = json.loads(raw)
             except Exception:
                 data = {"error": raw or str(e)}
+            output = str(data.get("output") or data.get("error") or "")
+            if agent_type == "openclaw@2026.2.9" and "pairing required" in output:
+                auto_pair_openclaw_client(gateway_token, timeout_seconds=20)
+                return post_once()
             raise RuntimeError(data.get("error") or data.get("output") or str(e))
 
     def send_agent_message_background(container_name, message, prelogged=False):
@@ -2189,6 +2228,10 @@ console.log(count);
             <span class="small" id="notice"></span>
           </div>
         </div>
+      </div>
+    </header>
+    <main class="wrap">
+      <div id="cards" class="grid"></div>
         <div class="model-panel">
           <div class="model-section">
             <div class="model-section-title"><a href="https://ollama.com/library" target="_blank" class="model-link-btn" title="浏览 Ollama 模型库 (opens in new tab)">🤖 Ollama 模型库 🌐</a></div>
@@ -2217,10 +2260,6 @@ console.log(count);
             <div id="pullLogs"></div>
           </div>
         </div>
-      </div>
-    </header>
-    <main class="wrap">
-      <div id="cards" class="grid"></div>
     </main>
     <script>
       const cards = document.getElementById("cards");
