@@ -474,11 +474,12 @@ def create_app(docker_client=None):
             "ollama_model": ollama_model,
         }
 
-    def upsert_claude_ollama_model(model_name):
+    def upsert_claude_ollama_model(model_name, config_subdir="claude"):
         _, ollama_model = split_openclaw_model_name(model_name)
-        claude_dir = os.path.join(app.config["CONFIG_ROOT"], "claude")
+        claude_dir = os.path.join(app.config["CONFIG_ROOT"], config_subdir)
         settings_path = os.path.join(claude_dir, "settings.json")
         config_path = os.path.join(claude_dir, "config.json")
+        project_path = f"/home/agent/.{config_subdir}/workspace/project"
         base_url = os.environ.get("CLAUDE_ANTHROPIC_BASE_URL", CLAUDE_DEFAULT_BASE_URL)
         token = os.environ.get("CLAUDE_ANTHROPIC_AUTH_TOKEN", CLAUDE_DEFAULT_AUTH_TOKEN)
         env = {
@@ -507,7 +508,7 @@ def create_app(docker_client=None):
             "hasCompletedOnboarding": True,
             "hasTrustDialogAccepted": True,
             "hasCompletedProjectOnboarding": True,
-            "trustedProjects": ["/home/agent/.claude/workspace/project"],
+            "trustedProjects": [project_path],
         })
         write_json_file(settings_path, settings)
 
@@ -546,6 +547,13 @@ def create_app(docker_client=None):
             "base_url": base_url,
             "auth_token_configured": bool(token),
         }
+
+    def upsert_agent_template_model(agent_type, model_name):
+        if agent_type == "openclaw@2026.2.9":
+            return upsert_openclaw_ollama_model(model_name)
+        if agent_type in ("claude@latest", "hermes@latest"):
+            return upsert_claude_ollama_model(model_name, AGENT_SPECS[agent_type]["config_subdir"])
+        raise ValueError(f"Unsupported agent type: {agent_type}")
 
     def pull_ollama_model_async(ollama_model):
         started_at = now_iso()
@@ -1567,13 +1575,28 @@ console.log(count);
     def api_update_agent_model(name):
         body = request.get_json(silent=True) or {}
         model_name = (body.get("model") or "").strip()
-        restart = bool(body.get("restart", True))
         try:
             container = _require_managed(name)
             labels = ((getattr(container, "attrs", {}) or {}).get("Config", {}) or {}).get("Labels", {}) or (getattr(container, "labels", {}) or {})
             agent_type = labels.get("hermit.agent_type", "")
-            payload = apply_model_to_container(container, agent_type, model_name, restart=restart)
-            return jsonify({"ok": True, "container_name": name, "agent_type": agent_type, **payload})
+            template_info = upsert_agent_template_model(agent_type, model_name)
+            _, ollama_model = split_openclaw_model_name(model_name)
+            pull_info = pull_ollama_model_async(ollama_model)
+            recreated = recreate_agent(container.name)
+            add_frpc_rule(recreated["host_port"])
+            time.sleep(8)
+            scp_rules_to_container(recreated["container_name"], project_path_for_payload(recreated))
+            return jsonify({
+                "ok": True,
+                "container_name": recreated["container_name"],
+                "agent_type": agent_type,
+                "model": template_info.get("primary_model") or template_info.get("model") or model_name,
+                "ollama_model": ollama_model,
+                "ollama_pull": pull_info,
+                "template": template_info,
+                "recreated": recreated,
+                "updated_at": now_iso(),
+            })
         except ValueError as e:
             return jsonify({"error": str(e)}), 400
         except PermissionError as e:
@@ -1921,7 +1944,7 @@ console.log(count);
   <head>
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
-    <title>Hermit Control {CONTROL_BASE_PORT}</title>
+    <title>OLLAMA CLAW Control {CONTROL_BASE_PORT}</title>
     <style>
       :root {{
         --bg: #070A10;
@@ -2610,8 +2633,8 @@ console.log(count);
             return;
           }}
           agentModelSelect.style.display = "none";
-          setAgentModelLabel("应用中...");
-          logBox.textContent += `\\n[模型] 拉取并应用到本容器: ${{modelName}}\\n`;
+          setAgentModelLabel("重建中...");
+          logBox.textContent += `\\n[模型] 写入模板并重建本容器: ${{modelName}}\\n`;
           const r = await fetch(`/api/agents/${{encodeURIComponent(item.container_name)}}/model`, {{
             method: "POST",
             headers: {{ "Content-Type": "application/json" }},
@@ -2622,7 +2645,7 @@ console.log(count);
             logBox.textContent += `ERROR: ${{d.error || `HTTP ${{r.status}}`}}\\n`;
             return;
           }}
-          logBox.textContent += `[模型] 已写入配置并重启容器: ${{d.model || modelName}}\\n`;
+          logBox.textContent += `[模型] 已写入模板并重建容器: ${{d.container_name || item.container_name}}\\n`;
           if (d.ollama_pull) {{
             logBox.textContent += `[模型] Ollama 拉取任务已启动: ${{d.ollama_pull.model || modelName}}\\n`;
           }}

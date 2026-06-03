@@ -171,7 +171,7 @@ POST /api/agents/{container_name}/model
 }
 ```
 
-模型架构已改为容器卡片级别部署：模型管理区只负责查看/下载 Ollama 模型和更新默认模板，不再批量部署到所有容器。每个容器卡片的“拉取并应用模型”会启动 Ollama 拉取任务、写入该容器自己的配置文件，然后重启该容器。
+模型架构已改为容器卡片级别部署：模型管理区只负责查看/下载 Ollama 模型和更新默认模板，不再批量部署到所有容器。每个容器卡片选择模型后会启动 Ollama 拉取任务、写入对应 agent 类型的模板配置，然后重建该卡片容器。
 
 ### 查看日志
 ```
@@ -219,7 +219,7 @@ Claude 容器使用 `run_claude.js` 调用 Claude Code CLI，不再把 Claude �
 - `ANTHROPIC_AUTH_TOKEN` / `ANTHROPIC_API_KEY`: 默认 `ollama`
 - `ANTHROPIC_MODEL`: 跟随该容器卡片应用的 Ollama 模型
 
-模型管理页面不再负责把模型部署到各个容器。全局模型区只用于下载 Ollama 模型、更新新容器使用的默认模板配置；运行中的 Claude/OpenClaw/Hermes 容器需要在各自容器卡片里点击“拉取并应用模型”，由控制面板写入该容器内的配置并重启该容器。
+模型管理页面不再负责把模型部署到各个容器。全局模型区只用于下载 Ollama 模型、更新新容器使用的默认模板配置；运行中的 Claude/OpenClaw/Hermes 容器需要在各自容器卡片里选择模型，由控制面板写入对应模板配置并重建该卡片容器。
 
 ### 下载模型到 Ollama
 

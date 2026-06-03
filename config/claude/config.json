@@ -23,6 +23,7 @@
             "ANTHROPIC_DEFAULT_HAIKU_MODEL": "qwen2.5:0.5b",
             "ANTHROPIC_DEFAULT_OPUS_MODEL": "qwen2.5:0.5b",
             "ANTHROPIC_DEFAULT_SONNET_MODEL": "qwen2.5:0.5b",
+            "OLLAMA_BASE_URL": "http://ollama:11434",
             "OLLAMA_MODEL": "qwen2.5:0.5b",
             "API_TIMEOUT_MS": "3000000",
             "ANTHROPIC_DISABLE_PREFLIGHT": "1",
@@ -33,12 +34,12 @@
         },
         "websiteUrl": "https://ollama.com/library",
         "category": "local",
-        "createdAt": 1780302663650,
+        "createdAt": 1780454562097,
         "meta": {
           "custom_endpoints": {
             "http://ollama:11434": {
               "url": "http://ollama:11434",
-              "addedAt": 1780302663650
+              "addedAt": 1780454562097
             }
           }
         }
