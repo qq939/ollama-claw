@@ -1,0 +1,6 @@
+﻿page 1: 1518 chars, 1 fonts
+  font='STSongStd-Light'  total=1518  sample='OpenC'
+page 2: 1263 chars, 1 fonts
+  font='STSongStd-Light'  total=1263  sample='OpenC'
+page 3: 939 chars, 1 fonts
+  font='STSongStd-Light'  total=939  sample='OpenC'

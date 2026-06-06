@@ -1,0 +1,2594 @@
+﻿
+    <!DOCTYPE html>
+    <html>
+    <head>
+        <meta charset="utf-8">
+        <title>文件托管服务</title>
+        <style>
+            body { font-family: sans-serif; max-width: 800px; margin: 2rem auto; padding: 0 1rem; }
+            h1 { color: #333; }
+            ul { list-style: none; padding: 0; }
+            li { padding: 10px; border-bottom: 1px solid #eee; display: flex; justify-content: space-between; align-items: center; }
+            a { text-decoration: none; color: #007bff; }
+            a:hover { text-decoration: underline; }
+            .empty { color: #999; font-style: italic; }
+            .actions { display: flex; gap: 10px; }
+            .btn-delete { cursor: pointer; background: none; border: none; font-size: 1.2em; }
+            .btn-delete:hover { opacity: 0.7; }
+            .sort-controls { margin-bottom: 20px; }
+            .sort-controls a { margin-right: 15px; font-weight: bold; }
+            .sort-controls a.active { color: #333; cursor: default; text-decoration: none; }
+            
+            /* 公告板样式 */
+            .notice-board {
+                margin: 20px 0; 
+                padding: 10px; 
+                border: 1px solid #eee; 
+                background: #f9f9f9; 
+                position: relative;
+            }
+            .notice-board textarea {
+                width: 100%;
+                height: 150px;
+                border: 1px solid #ccc;
+                border-bottom: none;
+                resize: vertical;
+                font-family: monospace;
+                box-sizing: border-box; /* ensure padding doesn't overflow */
+            }
+            .notice-copy-btn {
+                display: block;
+                margin-top: 0;
+                padding: 4px 12px;
+                border: 1px solid #ccc;
+                border-top: none;
+                background: #81D8D0;
+                color: #fff;
+                cursor: pointer;
+                flex: 20;
+            }
+            .notice-copy-btn:hover {
+                background: #73cbc3;
+            }
+            .notice-save-btn {
+                display: block;
+                padding: 4px 12px;
+                border: 1px solid #ccc;
+                border-top: none;
+                background: #fff;
+                color: #333;
+                cursor: pointer;
+                flex: 1;
+            }
+            .notice-save-btn:hover {
+                background: #f2f2f2;
+            }
+            .notice-copy-bar {
+                position: static;
+                padding: 0;
+                display: flex;
+                gap: 6px;
+            }
+            .notice-board {
+                padding-bottom: 0;
+            }
+            .btn-close-notice {
+                position: absolute;
+                top: 5px;
+                right: 5px;
+                border: none;
+                background: transparent;
+                cursor: pointer;
+                font-size: 16px;
+                color: #999;
+            }
+            .btn-close-notice:hover { color: #333; }
+            #ws-status-indicator {
+                position: absolute;
+                top: 5px;
+                left: 5px;
+                width: 10px;
+                height: 10px;
+                border-radius: 50%;
+                background-color: red; /* Default to disconnected */
+                border: 1px solid #ccc;
+            }
+            .notice-tools {
+                position: absolute;
+                bottom: 8px;
+                right: 8px;
+                z-index: 2;
+            }
+            .notice-tools button {
+                cursor: pointer;
+                background: none;
+                border: none;
+                font-size: 16px;
+                color: #999;
+            }
+            .notice-tools button:hover { color: #333; }
+            .notice-copy-bar {
+                position: static;
+                padding: 0;
+                display: flex;
+                gap: 6px;
+            }
+            .notice-board {
+                padding-bottom: 0;
+            }
+        </style>
+        <script>
+            const CHUNK_SIZE_BROWSER = 10 * 1024 * 1024; // 浏览器分片上传大小 10MB
+            async function sha256Hex(file) {
+                const buf = await file.arrayBuffer();
+                const digest = await crypto.subtle.digest("SHA-256", buf);
+                const arr = Array.from(new Uint8Array(digest));
+                return arr.map(b => b.toString(16).padStart(2, "0")).join("");
+            }
+            async function deleteFile(filename) {
+                if (!confirm(`确定要删除 ${filename} 吗？`)) return;
+                try {
+                    const response = await fetch(`/${filename}`, { method: 'DELETE' });
+                    if (response.ok) {
+                        window.location.reload();
+                    } else {
+                        alert('删除失败');
+                    }
+                } catch (e) {
+                    alert('删除出错: ' + e);
+                }
+            }
+
+            async function chunkedUpload(inputEl) {
+                const file = inputEl.files && inputEl.files[0];
+                if (!file) {
+                    alert('请先选择文件');
+                    return;
+                }
+                const filename = file.name;
+                const total = file.size;
+                let offset = 0;
+                try {
+                    while (offset < total) {
+                        const end = Math.min(offset + CHUNK_SIZE_BROWSER, total);
+                        const blob = file.slice(offset, end);
+                        const resp = await fetch(`/${encodeURIComponent(filename)}`, {
+                            method: 'PUT',
+                            body: await blob.arrayBuffer(),
+                        });
+                        if (resp.status !== 201) {
+                            const text = await resp.text();
+                            throw new Error(`分片上传失败: ${resp.status} ${text}`);
+                        }
+                        offset = end;
+                    }
+                    alert('分片上传成功');
+                    window.location.reload();
+                } catch (err) {
+                    alert('分片上传出错: ' + err.message);
+                }
+            }
+
+            async function resumableUpload(inputEl) {
+                const file = inputEl.files && inputEl.files[0];
+                if (!file) {
+                    alert('请先选择文件');
+                    return;
+                }
+                const filename = file.name;
+                const size = file.size;
+                const chunkSize = CHUNK_SIZE_BROWSER;
+                const totalChunks = Math.ceil(size / chunkSize);
+                const hashAlgo = "sha256";
+                const hash = await sha256Hex(file);
+                // 初始化会话（包含秒传判定）
+                let resp = await fetch('/upload/init', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ filename, size, hash_algo: hashAlgo, hash, chunk_size: chunkSize, total_chunks: totalChunks })
+                });
+                if (!resp.ok) {
+                    const t = await resp.text();
+                    alert('初始化失败: ' + t);
+                    return;
+                }
+                const info = await resp.json();
+                if (info.skip) {
+                    alert('文件已存在，已秒传：' + info.url);
+                    window.location.reload();
+                    return;
+                }
+                const uploadId = info.upload_id;
+                const uploaded = new Set(info.uploaded || []);
+                // 上传缺失分片（带简单重试）
+                for (let i = 0; i < totalChunks; i++) {
+                    if (uploaded.has(i)) continue;
+                    const start = i * chunkSize;
+                    const end = Math.min(start + chunkSize, size);
+                    const blob = file.slice(start, end);
+                    let ok = false;
+                    for (let attempt = 0; attempt < 3 && !ok; attempt++) {
+                        const r = await fetch(`/upload/chunk/${encodeURIComponent(uploadId)}/${i}`, {
+                            method: 'PUT',
+                            body: await blob.arrayBuffer(),
+                        });
+                        ok = r.status === 201;
+                    }
+                    if (!ok) {
+                        alert('分片上传失败，无法完成：' + i);
+                        return;
+                    }
+                }
+                // 合并完成
+                const c = await fetch(`/upload/complete/${encodeURIComponent(uploadId)}`, {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ filename, size, total_chunks: totalChunks, hash_algo: hashAlgo, hash })
+                });
+                if (c.ok) {
+                    const url = await c.text();
+                    alert('上传完成：' + url);
+                    window.location.reload();
+                } else {
+                    const tx = await c.text();
+                    alert('合并失败：' + tx);
+                }
+            }
+
+            async function saveNotice() {
+                try {
+                    const response = await fetch('/save_notice', { method: 'POST' });
+                    if (response.ok) {
+                        const data = await response.json();
+                        alert(`公告已保存为: ${data.filename}`);
+                        window.location.reload();
+                    } else {
+                        const err = await response.json();
+                        alert('保存失败: ' + (err.detail || '未知错误'));
+                    }
+                } catch (e) {
+                    alert('保存出错: ' + e);
+                }
+            }
+
+            function copyNoticeToClipboard() {
+                try {
+                    const contentEl = document.getElementById('notice-content');
+                    const content = contentEl.value || '';
+
+                    if (navigator.clipboard && navigator.clipboard.writeText) {
+                        navigator.clipboard.writeText(content)
+                            .then(() => {})
+                            .catch(() => legacyCopy(contentEl, content));
+                    } else {
+                        legacyCopy(contentEl, content);
+                    }
+                } catch (e) {
+                    alert('复制出错: ' + e);
+                }
+            }
+
+            function legacyCopy(el, text) {
+                try {
+                    const ta = document.createElement('textarea');
+                    ta.value = text;
+                    ta.style.position = 'fixed';
+                    ta.style.top = '-1000px';
+                    ta.style.left = '-1000px';
+                    document.body.appendChild(ta);
+                    ta.focus();
+                    ta.select();
+                    const ok = document.execCommand('copy');
+                    document.body.removeChild(ta);
+                    if (!ok) {
+                        alert('复制失败，请手动选择文本后复制');
+                    }
+                } catch (err) {
+                    try {
+                        el.focus();
+                        el.select();
+                        const ok2 = document.execCommand('copy');
+                        if (!ok2) {
+                            alert('复制失败，请手动选择文本后复制');
+                        }
+                    } catch (err2) {
+                        alert('复制失败，请手动选择文本后复制');
+                    }
+                }
+            }
+
+            // Notice Board Logic
+            document.addEventListener('DOMContentLoaded', () => {
+                const noticeArea = document.getElementById('notice-content');
+                const statusIndicator = document.getElementById('ws-status-indicator');
+                
+                // WebSocket connection
+                const wsProtocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
+                // 使用当前 host 和 protocol 连接 WebSocket，路径为 /ws
+                const wsUrl = `${wsProtocol}//${window.location.host}/ws`;
+                
+                let ws;
+                let isConnected = false;
+
+                function connect() {
+                    statusIndicator.style.backgroundColor = 'yellow'; // Connecting
+                    statusIndicator.title = `Connecting to ${wsUrl}...`;
+                    console.log('Connecting to WebSocket:', wsUrl);
+                    ws = new WebSocket(wsUrl);
+
+                    ws.onopen = () => {
+                        console.log('WebSocket connected');
+                        isConnected = true;
+                        statusIndicator.style.backgroundColor = 'green'; // Connected
+                        statusIndicator.title = 'Connected';
+                    };
+
+                    ws.onmessage = (event) => {
+                        console.log('WebSocket message received:', event.data);
+                        try {
+                            const data = JSON.parse(event.data);
+                            if (data.type === 'init' || data.type === 'update') {
+                                if (noticeArea.value !== data.content) {
+                                    const start = noticeArea.selectionStart;
+                                    const end = noticeArea.selectionEnd;
+                                    
+                                    noticeArea.value = data.content;
+                                    
+                                    if (document.activeElement === noticeArea) {
+                                        noticeArea.setSelectionRange(start, end);
+                                    }
+                                }
+                            }
+                        } catch (e) {
+                            console.error('Error parsing WebSocket message:', e);
+                        }
+                    };
+
+                    ws.onclose = () => {
+                        console.log('WebSocket disconnected, reconnecting...');
+                        isConnected = false;
+                        statusIndicator.style.backgroundColor = 'red'; // Disconnected
+                        statusIndicator.title = 'Disconnected (Reconnecting...)';
+                        setTimeout(connect, 3000);
+                    };
+
+                    ws.onerror = (err) => {
+                        console.error('WebSocket error:', err);
+                        ws.close();
+                    };
+                }
+
+                connect();
+
+                // 监听输入事件，发送更新
+                noticeArea.addEventListener('input', () => {
+                    if (ws && isConnected) {
+                        ws.send(JSON.stringify({
+                            type: 'update',
+                            content: noticeArea.value
+                        }));
+                    }
+                });
+
+                // 暴露重置函数给全局作用域
+                window.resetNotice = function() {
+                    if (ws && isConnected) {
+                        ws.send(JSON.stringify({
+                            type: 'reset'
+                        }));
+                    } else {
+                        alert('未连接到服务器，无法重置');
+                    }
+                };
+            });
+        </script>
+    </head>
+    <body>
+        <!-- 公告板模块 -->
+        <div class="notice-board">
+            <div id="ws-status-indicator" title="Connecting..."></div>
+            <button class="btn-close-notice" onclick="resetNotice()" title="重置公告">x</button>
+            <textarea id="notice-content" placeholder="公告板..."></textarea>
+            <div class="notice-copy-bar">
+                <button class="notice-copy-btn" onclick="copyNoticeToClipboard()">复制公告到剪贴板</button>
+                <button class="notice-save-btn" onclick="saveNotice()" title="保存公告">保存</button>
+            </div>
+        </div>
+
+        <p style="font-size: 0.8em; margin-bottom: 10px;">文件托管： <code>curl --upload-file file.txt http://obs.dimond.top/file.txt</code></p>
+        
+        <div style="margin: 20px 0; padding: 10px; border: 1px solid #eee; background: #f9f9f9;">
+            <form action="/" method="post" enctype="multipart/form-data">
+                <input type="file" name="file" required>
+                <input type="submit" value="上传">
+            </form>
+            <div style="margin-top:8px;">
+                <input type="file" id="chunkFile">
+                <button onclick="chunkedUpload(document.getElementById('chunkFile'))">分片上传(10MB)</button>
+            </div>
+            <div style="margin-top:8px;">
+                <input type="file" id="resumeFile">
+                <button onclick="resumableUpload(document.getElementById('resumeFile'))">断点续传(10MB+秒传)</button>
+            </div>
+        </div>
+        
+        <div class="sort-controls">
+            排序方式: 
+            <a href="?sort=time" class="active">按时间 (最新)</a>
+            <a href="?sort=ext" class="">按扩展名 (A-Z)</a>
+        </div>
+
+        <ul>
+    
+            <li>
+                <a href="http://obs.dimond.top/hbs_single_1780452844350_96f6aebf1a1a578a.jpg" target="_blank">hbs_single_1780452844350_96f6aebf1a1a578a.jpg</a> 
+                <span class="actions">
+                    <a href="http://obs.dimond.top/hbs_single_1780452844350_96f6aebf1a1a578a.jpg" download>下载</a>
+                    <button class="btn-delete" onclick="deleteFile('hbs_single_1780452844350_96f6aebf1a1a578a.jpg')" title="删除">🗑️</button>
+                </span>
+            </li>
+            
+            <li>
+                <a href="http://obs.dimond.top/hbs_single_1780407340249_5dfff0e6b342fc17.jpg" target="_blank">hbs_single_1780407340249_5dfff0e6b342fc17.jpg</a> 
+                <span class="actions">
+                    <a href="http://obs.dimond.top/hbs_single_1780407340249_5dfff0e6b342fc17.jpg" download>下载</a>
+                    <button class="btn-delete" onclick="deleteFile('hbs_single_1780407340249_5dfff0e6b342fc17.jpg')" title="删除">🗑️</button>
+                </span>
+            </li>
+            
+            <li>
+                <a href="http://obs.dimond.top/hbs_single_1780407291997_429c89ed966e7f43.jpg" target="_blank">hbs_single_1780407291997_429c89ed966e7f43.jpg</a> 
+                <span class="actions">
+                    <a href="http://obs.dimond.top/hbs_single_1780407291997_429c89ed966e7f43.jpg" download>下载</a>
+                    <button class="btn-delete" onclick="deleteFile('hbs_single_1780407291997_429c89ed966e7f43.jpg')" title="删除">🗑️</button>
+                </span>
+            </li>
+            
+            <li>
+                <a href="http://obs.dimond.top/PictureUnlock_s_2589316_user0.pictureunlock.jpg" target="_blank">PictureUnlock_s_2589316_user0.pictureunlock.jpg</a> 
+                <span class="actions">
+                    <a href="http://obs.dimond.top/PictureUnlock_s_2589316_user0.pictureunlock.jpg" download>下载</a>
+                    <button class="btn-delete" onclick="deleteFile('PictureUnlock_s_2589316_user0.pictureunlock.jpg')" title="删除">🗑️</button>
+                </span>
+            </li>
+            
+            <li>
+                <a href="http://obs.dimond.top/hbs_single_1780398669218_31b35d3f209896b7.jpeg" target="_blank">hbs_single_1780398669218_31b35d3f209896b7.jpeg</a> 
+                <span class="actions">
+                    <a href="http://obs.dimond.top/hbs_single_1780398669218_31b35d3f209896b7.jpeg" download>下载</a>
+                    <button class="btn-delete" onclick="deleteFile('hbs_single_1780398669218_31b35d3f209896b7.jpeg')" title="删除">🗑️</button>
+                </span>
+            </li>
+            
+            <li>
+                <a href="http://obs.dimond.top/hbs_single_1780398664268_3fda86a7b9f4bbd7.jpeg" target="_blank">hbs_single_1780398664268_3fda86a7b9f4bbd7.jpeg</a> 
+                <span class="actions">
+                    <a href="http://obs.dimond.top/hbs_single_1780398664268_3fda86a7b9f4bbd7.jpeg" download>下载</a>
+                    <button class="btn-delete" onclick="deleteFile('hbs_single_1780398664268_3fda86a7b9f4bbd7.jpeg')" title="删除">🗑️</button>
+                </span>
+            </li>
+            
+            <li>
+                <a href="http://obs.dimond.top/hbs_dual_1780395234667_d7332aff4fd7ca7c.jpg" target="_blank">hbs_dual_1780395234667_d7332aff4fd7ca7c.jpg</a> 
+                <span class="actions">
+                    <a href="http://obs.dimond.top/hbs_dual_1780395234667_d7332aff4fd7ca7c.jpg" download>下载</a>
+                    <button class="btn-delete" onclick="deleteFile('hbs_dual_1780395234667_d7332aff4fd7ca7c.jpg')" title="删除">🗑️</button>
+                </span>
+            </li>
+            
+            <li>
+                <a href="http://obs.dimond.top/hbs_single_1780395187119_f6111fc5d1fa22a5.jpg" target="_blank">hbs_single_1780395187119_f6111fc5d1fa22a5.jpg</a> 
+                <span class="actions">
+                    <a href="http://obs.dimond.top/hbs_single_1780395187119_f6111fc5d1fa22a5.jpg" download>下载</a>
+                    <button class="btn-delete" onclick="deleteFile('hbs_single_1780395187119_f6111fc5d1fa22a5.jpg')" title="删除">🗑️</button>
+                </span>
+            </li>
+            
+            <li>
+                <a href="http://obs.dimond.top/hbs_test_1780394614403_99d8184d697ae51d.jpg" target="_blank">hbs_test_1780394614403_99d8184d697ae51d.jpg</a> 
+                <span class="actions">
+                    <a href="http://obs.dimond.top/hbs_test_1780394614403_99d8184d697ae51d.jpg" download>下载</a>
+                    <button class="btn-delete" onclick="deleteFile('hbs_test_1780394614403_99d8184d697ae51d.jpg')" title="删除">🗑️</button>
+                </span>
+            </li>
+            
+            <li>
+                <a href="http://obs.dimond.top/hbs_single_1780394345920_8c5c11bd0330bcbe.JPG" target="_blank">hbs_single_1780394345920_8c5c11bd0330bcbe.JPG</a> 
+                <span class="actions">
+                    <a href="http://obs.dimond.top/hbs_single_1780394345920_8c5c11bd0330bcbe.JPG" download>下载</a>
+                    <button class="btn-delete" onclick="deleteFile('hbs_single_1780394345920_8c5c11bd0330bcbe.JPG')" title="删除">🗑️</button>
+                </span>
+            </li>
+            
+            <li>
+                <a href="http://obs.dimond.top/hbs_test_1780393235390_f5c22b0d91d1c15d.jpg" target="_blank">hbs_test_1780393235390_f5c22b0d91d1c15d.jpg</a> 
+                <span class="actions">
+                    <a href="http://obs.dimond.top/hbs_test_1780393235390_f5c22b0d91d1c15d.jpg" download>下载</a>
+                    <button class="btn-delete" onclick="deleteFile('hbs_test_1780393235390_f5c22b0d91d1c15d.jpg')" title="删除">🗑️</button>
+                </span>
+            </li>
+            
+            <li>
+                <a href="http://obs.dimond.top/human-beast-swap.tar.gz" target="_blank">human-beast-swap.tar.gz</a> 
+                <span class="actions">
+                    <a href="http://obs.dimond.top/human-beast-swap.tar.gz" download>下载</a>
+                    <button class="btn-delete" onclick="deleteFile('human-beast-swap.tar.gz')" title="删除">🗑️</button>
+                </span>
+            </li>
+            
+            <li>
+                <a href="http://obs.dimond.top/1dst.mp4" target="_blank">1dst.mp4</a> 
+                <span class="actions">
+                    <a href="http://obs.dimond.top/1dst.mp4" download>下载</a>
+                    <button class="btn-delete" onclick="deleteFile('1dst.mp4')" title="删除">🗑️</button>
+                </span>
+            </li>
+            
+            <li>
+                <a href="http://obs.dimond.top/IMG_9691post.mp4" target="_blank">IMG_9691post.mp4</a> 
+                <span class="actions">
+                    <a href="http://obs.dimond.top/IMG_9691post.mp4" download>下载</a>
+                    <button class="btn-delete" onclick="deleteFile('IMG_9691post.mp4')" title="删除">🗑️</button>
+                </span>
+            </li>
+            
+            <li>
+                <a href="http://obs.dimond.top/IMG_9692post.mp4" target="_blank">IMG_9692post.mp4</a> 
+                <span class="actions">
+                    <a href="http://obs.dimond.top/IMG_9692post.mp4" download>下载</a>
+                    <button class="btn-delete" onclick="deleteFile('IMG_9692post.mp4')" title="删除">🗑️</button>
+                </span>
+            </li>
+            
+            <li>
+                <a href="http://obs.dimond.top/IMG_9690post.mp4" target="_blank">IMG_9690post.mp4</a> 
+                <span class="actions">
+                    <a href="http://obs.dimond.top/IMG_9690post.mp4" download>下载</a>
+                    <button class="btn-delete" onclick="deleteFile('IMG_9690post.mp4')" title="删除">🗑️</button>
+                </span>
+            </li>
+            
+            <li>
+                <a href="http://obs.dimond.top/IMG_9692.MP4" target="_blank">IMG_9692.MP4</a> 
+                <span class="actions">
+                    <a href="http://obs.dimond.top/IMG_9692.MP4" download>下载</a>
+                    <button class="btn-delete" onclick="deleteFile('IMG_9692.MP4')" title="删除">🗑️</button>
+                </span>
+            </li>
+            
+            <li>
+                <a href="http://obs.dimond.top/IMG_9691.MP4" target="_blank">IMG_9691.MP4</a> 
+                <span class="actions">
+                    <a href="http://obs.dimond.top/IMG_9691.MP4" download>下载</a>
+                    <button class="btn-delete" onclick="deleteFile('IMG_9691.MP4')" title="删除">🗑️</button>
+                </span>
+            </li>
+            
+            <li>
+                <a href="http://obs.dimond.top/IMG_9690.MP4" target="_blank">IMG_9690.MP4</a> 
+                <span class="actions">
+                    <a href="http://obs.dimond.top/IMG_9690.MP4" download>下载</a>
+                    <button class="btn-delete" onclick="deleteFile('IMG_9690.MP4')" title="删除">🗑️</button>
+                </span>
+            </li>
+            
+            <li>
+                <a href="http://obs.dimond.top/ISP网口相机.7z" target="_blank">ISP网口相机.7z</a> 
+                <span class="actions">
+                    <a href="http://obs.dimond.top/ISP网口相机.7z" download>下载</a>
+                    <button class="btn-delete" onclick="deleteFile('ISP网口相机.7z')" title="删除">🗑️</button>
+                </span>
+            </li>
+            
+            <li>
+                <a href="http://obs.dimond.top/border_collie_dog_orbit_camera_360.mp4" target="_blank">border_collie_dog_orbit_camera_360.mp4</a> 
+                <span class="actions">
+                    <a href="http://obs.dimond.top/border_collie_dog_orbit_camera_360.mp4" download>下载</a>
+                    <button class="btn-delete" onclick="deleteFile('border_collie_dog_orbit_camera_360.mp4')" title="删除">🗑️</button>
+                </span>
+            </li>
+            
+            <li>
+                <a href="http://obs.dimond.top/border_collie_camera_orbit_360.mp4" target="_blank">border_collie_camera_orbit_360.mp4</a> 
+                <span class="actions">
+                    <a href="http://obs.dimond.top/border_collie_camera_orbit_360.mp4" download>下载</a>
+                    <button class="btn-delete" onclick="deleteFile('border_collie_camera_orbit_360.mp4')" title="删除">🗑️</button>
+                </span>
+            </li>
+            
+            <li>
+                <a href="http://obs.dimond.top/amcap v3.0.9(1).exe" target="_blank">amcap v3.0.9(1).exe</a> 
+                <span class="actions">
+                    <a href="http://obs.dimond.top/amcap v3.0.9(1).exe" download>下载</a>
+                    <button class="btn-delete" onclick="deleteFile('amcap v3.0.9(1).exe')" title="删除">🗑️</button>
+                </span>
+            </li>
+            
+            <li>
+                <a href="http://obs.dimond.top/ollama.tar" target="_blank">ollama.tar</a> 
+                <span class="actions">
+                    <a href="http://obs.dimond.top/ollama.tar" download>下载</a>
+                    <button class="btn-delete" onclick="deleteFile('ollama.tar')" title="删除">🗑️</button>
+                </span>
+            </li>
+            
+            <li>
+                <a href="http://obs.dimond.top/6afb2d6df98791b6f545e09aba42f07b.mov" target="_blank">6afb2d6df98791b6f545e09aba42f07b.mov</a> 
+                <span class="actions">
+                    <a href="http://obs.dimond.top/6afb2d6df98791b6f545e09aba42f07b.mov" download>下载</a>
+                    <button class="btn-delete" onclick="deleteFile('6afb2d6df98791b6f545e09aba42f07b.mov')" title="删除">🗑️</button>
+                </span>
+            </li>
+            
+            <li>
+                <a href="http://obs.dimond.top/摇奶茶标准SOP监测方案v1.0.pptx" target="_blank">摇奶茶标准SOP监测方案v1.0.pptx</a> 
+                <span class="actions">
+                    <a href="http://obs.dimond.top/摇奶茶标准SOP监测方案v1.0.pptx" download>下载</a>
+                    <button class="btn-delete" onclick="deleteFile('摇奶茶标准SOP监测方案v1.0.pptx')" title="删除">🗑️</button>
+                </span>
+            </li>
+            
+            <li>
+                <a href="http://obs.dimond.top/ollama-claw.zip" target="_blank">ollama-claw.zip</a> 
+                <span class="actions">
+                    <a href="http://obs.dimond.top/ollama-claw.zip" download>下载</a>
+                    <button class="btn-delete" onclick="deleteFile('ollama-claw.zip')" title="删除">🗑️</button>
+                </span>
+            </li>
+            
+            <li>
+                <a href="http://obs.dimond.top/20260512061602公告板.txt" target="_blank">20260512061602公告板.txt</a> 
+                <span class="actions">
+                    <a href="http://obs.dimond.top/20260512061602公告板.txt" download>下载</a>
+                    <button class="btn-delete" onclick="deleteFile('20260512061602公告板.txt')" title="删除">🗑️</button>
+                </span>
+            </li>
+            
+            <li>
+                <a href="http://obs.dimond.top/20260512044047公告板.txt" target="_blank">20260512044047公告板.txt</a> 
+                <span class="actions">
+                    <a href="http://obs.dimond.top/20260512044047公告板.txt" download>下载</a>
+                    <button class="btn-delete" onclick="deleteFile('20260512044047公告板.txt')" title="删除">🗑️</button>
+                </span>
+            </li>
+            
+            <li>
+                <a href="http://obs.dimond.top/20260511085430公告板.txt" target="_blank">20260511085430公告板.txt</a> 
+                <span class="actions">
+                    <a href="http://obs.dimond.top/20260511085430公告板.txt" download>下载</a>
+                    <button class="btn-delete" onclick="deleteFile('20260511085430公告板.txt')" title="删除">🗑️</button>
+                </span>
+            </li>
+            
+            <li>
+                <a href="http://obs.dimond.top/pose.tar.gz" target="_blank">pose.tar.gz</a> 
+                <span class="actions">
+                    <a href="http://obs.dimond.top/pose.tar.gz" download>下载</a>
+                    <button class="btn-delete" onclick="deleteFile('pose.tar.gz')" title="删除">🗑️</button>
+                </span>
+            </li>
+            
+            <li>
+                <a href="http://obs.dimond.top/dst.mp4" target="_blank">dst.mp4</a> 
+                <span class="actions">
+                    <a href="http://obs.dimond.top/dst.mp4" download>下载</a>
+                    <button class="btn-delete" onclick="deleteFile('dst.mp4')" title="删除">🗑️</button>
+                </span>
+            </li>
+            
+            <li>
+                <a href="http://obs.dimond.top/claude调用方法.txt" target="_blank">claude调用方法.txt</a> 
+                <span class="actions">
+                    <a href="http://obs.dimond.top/claude调用方法.txt" download>下载</a>
+                    <button class="btn-delete" onclick="deleteFile('claude调用方法.txt')" title="删除">🗑️</button>
+                </span>
+            </li>
+            
+            <li>
+                <a href="http://obs.dimond.top/project.tar.gz" target="_blank">project.tar.gz</a> 
+                <span class="actions">
+                    <a href="http://obs.dimond.top/project.tar.gz" download>下载</a>
+                    <button class="btn-delete" onclick="deleteFile('project.tar.gz')" title="删除">🗑️</button>
+                </span>
+            </li>
+            
+            <li>
+                <a href="http://obs.dimond.top/resume_jiangzhicong_software_engineer_ai.pdf" target="_blank">resume_jiangzhicong_software_engineer_ai.pdf</a> 
+                <span class="actions">
+                    <a href="http://obs.dimond.top/resume_jiangzhicong_software_engineer_ai.pdf" download>下载</a>
+                    <button class="btn-delete" onclick="deleteFile('resume_jiangzhicong_software_engineer_ai.pdf')" title="删除">🗑️</button>
+                </span>
+            </li>
+            
+            <li>
+                <a href="http://obs.dimond.top/resume_optimization_guide.pdf" target="_blank">resume_optimization_guide.pdf</a> 
+                <span class="actions">
+                    <a href="http://obs.dimond.top/resume_optimization_guide.pdf" download>下载</a>
+                    <button class="btn-delete" onclick="deleteFile('resume_optimization_guide.pdf')" title="删除">🗑️</button>
+                </span>
+            </li>
+            
+            <li>
+                <a href="http://obs.dimond.top/18081-jobfinder.zip" target="_blank">18081-jobfinder.zip</a> 
+                <span class="actions">
+                    <a href="http://obs.dimond.top/18081-jobfinder.zip" download>下载</a>
+                    <button class="btn-delete" onclick="deleteFile('18081-jobfinder.zip')" title="删除">🗑️</button>
+                </span>
+            </li>
+            
+            <li>
+                <a href="http://obs.dimond.top/resume_jiangzhicong_2025-11-04.pdf" target="_blank">resume_jiangzhicong_2025-11-04.pdf</a> 
+                <span class="actions">
+                    <a href="http://obs.dimond.top/resume_jiangzhicong_2025-11-04.pdf" download>下载</a>
+                    <button class="btn-delete" onclick="deleteFile('resume_jiangzhicong_2025-11-04.pdf')" title="删除">🗑️</button>
+                </span>
+            </li>
+            
+            <li>
+                <a href="http://obs.dimond.top/中科大一键安装brew.txt" target="_blank">中科大一键安装brew.txt</a> 
+                <span class="actions">
+                    <a href="http://obs.dimond.top/中科大一键安装brew.txt" download>下载</a>
+                    <button class="btn-delete" onclick="deleteFile('中科大一键安装brew.txt')" title="删除">🗑️</button>
+                </span>
+            </li>
+            
+            <li>
+                <a href="http://obs.dimond.top/pulade6.mp4" target="_blank">pulade6.mp4</a> 
+                <span class="actions">
+                    <a href="http://obs.dimond.top/pulade6.mp4" download>下载</a>
+                    <button class="btn-delete" onclick="deleteFile('pulade6.mp4')" title="删除">🗑️</button>
+                </span>
+            </li>
+            
+            <li>
+                <a href="http://obs.dimond.top/防倾倒.zip" target="_blank">防倾倒.zip</a> 
+                <span class="actions">
+                    <a href="http://obs.dimond.top/防倾倒.zip" download>下载</a>
+                    <button class="btn-delete" onclick="deleteFile('防倾倒.zip')" title="删除">🗑️</button>
+                </span>
+            </li>
+            
+            <li>
+                <a href="http://obs.dimond.top/Clash.Verge_2.4.7_x64-setup.exe" target="_blank">Clash.Verge_2.4.7_x64-setup.exe</a> 
+                <span class="actions">
+                    <a href="http://obs.dimond.top/Clash.Verge_2.4.7_x64-setup.exe" download>下载</a>
+                    <button class="btn-delete" onclick="deleteFile('Clash.Verge_2.4.7_x64-setup.exe')" title="删除">🗑️</button>
+                </span>
+            </li>
+            
+            <li>
+                <a href="http://obs.dimond.top/3333.mp4" target="_blank">3333.mp4</a> 
+                <span class="actions">
+                    <a href="http://obs.dimond.top/3333.mp4" download>下载</a>
+                    <button class="btn-delete" onclick="deleteFile('3333.mp4')" title="删除">🗑️</button>
+                </span>
+            </li>
+            
+            <li>
+                <a href="http://obs.dimond.top/33_annotated.mp4" target="_blank">33_annotated.mp4</a> 
+                <span class="actions">
+                    <a href="http://obs.dimond.top/33_annotated.mp4" download>下载</a>
+                    <button class="btn-delete" onclick="deleteFile('33_annotated.mp4')" title="删除">🗑️</button>
+                </span>
+            </li>
+            
+            <li>
+                <a href="http://obs.dimond.top/33.mp4" target="_blank">33.mp4</a> 
+                <span class="actions">
+                    <a href="http://obs.dimond.top/33.mp4" download>下载</a>
+                    <button class="btn-delete" onclick="deleteFile('33.mp4')" title="删除">🗑️</button>
+                </span>
+            </li>
+            
+            <li>
+                <a href="http://obs.dimond.top/3.mp4" target="_blank">3.mp4</a> 
+                <span class="actions">
+                    <a href="http://obs.dimond.top/3.mp4" download>下载</a>
+                    <button class="btn-delete" onclick="deleteFile('3.mp4')" title="删除">🗑️</button>
+                </span>
+            </li>
+            
+            <li>
+                <a href="http://obs.dimond.top/3_annotated.mp4" target="_blank">3_annotated.mp4</a> 
+                <span class="actions">
+                    <a href="http://obs.dimond.top/3_annotated.mp4" download>下载</a>
+                    <button class="btn-delete" onclick="deleteFile('3_annotated.mp4')" title="删除">🗑️</button>
+                </span>
+            </li>
+            
+            <li>
+                <a href="http://obs.dimond.top/1dst_annotated.mp4" target="_blank">1dst_annotated.mp4</a> 
+                <span class="actions">
+                    <a href="http://obs.dimond.top/1dst_annotated.mp4" download>下载</a>
+                    <button class="btn-delete" onclick="deleteFile('1dst_annotated.mp4')" title="删除">🗑️</button>
+                </span>
+            </li>
+            
+            <li>
+                <a href="http://obs.dimond.top/4.mp4" target="_blank">4.mp4</a> 
+                <span class="actions">
+                    <a href="http://obs.dimond.top/4.mp4" download>下载</a>
+                    <button class="btn-delete" onclick="deleteFile('4.mp4')" title="删除">🗑️</button>
+                </span>
+            </li>
+            
+            <li>
+                <a href="http://obs.dimond.top/4_annotated.mp4" target="_blank">4_annotated.mp4</a> 
+                <span class="actions">
+                    <a href="http://obs.dimond.top/4_annotated.mp4" download>下载</a>
+                    <button class="btn-delete" onclick="deleteFile('4_annotated.mp4')" title="删除">🗑️</button>
+                </span>
+            </li>
+            
+            <li>
+                <a href="http://obs.dimond.top/pulade3_annotated.mp4" target="_blank">pulade3_annotated.mp4</a> 
+                <span class="actions">
+                    <a href="http://obs.dimond.top/pulade3_annotated.mp4" download>下载</a>
+                    <button class="btn-delete" onclick="deleteFile('pulade3_annotated.mp4')" title="删除">🗑️</button>
+                </span>
+            </li>
+            
+            <li>
+                <a href="http://obs.dimond.top/pulade2_annotated.mp4" target="_blank">pulade2_annotated.mp4</a> 
+                <span class="actions">
+                    <a href="http://obs.dimond.top/pulade2_annotated.mp4" download>下载</a>
+                    <button class="btn-delete" onclick="deleteFile('pulade2_annotated.mp4')" title="删除">🗑️</button>
+                </span>
+            </li>
+            
+            <li>
+                <a href="http://obs.dimond.top/pulade3.mp4" target="_blank">pulade3.mp4</a> 
+                <span class="actions">
+                    <a href="http://obs.dimond.top/pulade3.mp4" download>下载</a>
+                    <button class="btn-delete" onclick="deleteFile('pulade3.mp4')" title="删除">🗑️</button>
+                </span>
+            </li>
+            
+            <li>
+                <a href="http://obs.dimond.top/2.mp4" target="_blank">2.mp4</a> 
+                <span class="actions">
+                    <a href="http://obs.dimond.top/2.mp4" download>下载</a>
+                    <button class="btn-delete" onclick="deleteFile('2.mp4')" title="删除">🗑️</button>
+                </span>
+            </li>
+            
+            <li>
+                <a href="http://obs.dimond.top/2_annotated.mp4" target="_blank">2_annotated.mp4</a> 
+                <span class="actions">
+                    <a href="http://obs.dimond.top/2_annotated.mp4" download>下载</a>
+                    <button class="btn-delete" onclick="deleteFile('2_annotated.mp4')" title="删除">🗑️</button>
+                </span>
+            </li>
+            
+            <li>
+                <a href="http://obs.dimond.top/pulaide_annotated.mp4" target="_blank">pulaide_annotated.mp4</a> 
+                <span class="actions">
+                    <a href="http://obs.dimond.top/pulaide_annotated.mp4" download>下载</a>
+                    <button class="btn-delete" onclick="deleteFile('pulaide_annotated.mp4')" title="删除">🗑️</button>
+                </span>
+            </li>
+            
+            <li>
+                <a href="http://obs.dimond.top/1.mp4" target="_blank">1.mp4</a> 
+                <span class="actions">
+                    <a href="http://obs.dimond.top/1.mp4" download>下载</a>
+                    <button class="btn-delete" onclick="deleteFile('1.mp4')" title="删除">🗑️</button>
+                </span>
+            </li>
+            
+            <li>
+                <a href="http://obs.dimond.top/159_1776747639_annotated.mp4" target="_blank">159_1776747639_annotated.mp4</a> 
+                <span class="actions">
+                    <a href="http://obs.dimond.top/159_1776747639_annotated.mp4" download>下载</a>
+                    <button class="btn-delete" onclick="deleteFile('159_1776747639_annotated.mp4')" title="删除">🗑️</button>
+                </span>
+            </li>
+            
+            <li>
+                <a href="http://obs.dimond.top/clip_annotated.mp4" target="_blank">clip_annotated.mp4</a> 
+                <span class="actions">
+                    <a href="http://obs.dimond.top/clip_annotated.mp4" download>下载</a>
+                    <button class="btn-delete" onclick="deleteFile('clip_annotated.mp4')" title="删除">🗑️</button>
+                </span>
+            </li>
+            
+            <li>
+                <a href="http://obs.dimond.top/pulaide.mp4" target="_blank">pulaide.mp4</a> 
+                <span class="actions">
+                    <a href="http://obs.dimond.top/pulaide.mp4" download>下载</a>
+                    <button class="btn-delete" onclick="deleteFile('pulaide.mp4')" title="删除">🗑️</button>
+                </span>
+            </li>
+            
+            <li>
+                <a href="http://obs.dimond.top/dst_annotated.mp4" target="_blank">dst_annotated.mp4</a> 
+                <span class="actions">
+                    <a href="http://obs.dimond.top/dst_annotated.mp4" download>下载</a>
+                    <button class="btn-delete" onclick="deleteFile('dst_annotated.mp4')" title="删除">🗑️</button>
+                </span>
+            </li>
+            
+            <li>
+                <a href="http://obs.dimond.top/output_annotated.mp4" target="_blank">output_annotated.mp4</a> 
+                <span class="actions">
+                    <a href="http://obs.dimond.top/output_annotated.mp4" download>下载</a>
+                    <button class="btn-delete" onclick="deleteFile('output_annotated.mp4')" title="删除">🗑️</button>
+                </span>
+            </li>
+            
+            <li>
+                <a href="http://obs.dimond.top/output_annotated_annotated.mp4" target="_blank">output_annotated_annotated.mp4</a> 
+                <span class="actions">
+                    <a href="http://obs.dimond.top/output_annotated_annotated.mp4" download>下载</a>
+                    <button class="btn-delete" onclick="deleteFile('output_annotated_annotated.mp4')" title="删除">🗑️</button>
+                </span>
+            </li>
+            
+            <li>
+                <a href="http://obs.dimond.top/163_1776747657_annotated.mp4" target="_blank">163_1776747657_annotated.mp4</a> 
+                <span class="actions">
+                    <a href="http://obs.dimond.top/163_1776747657_annotated.mp4" download>下载</a>
+                    <button class="btn-delete" onclick="deleteFile('163_1776747657_annotated.mp4')" title="删除">🗑️</button>
+                </span>
+            </li>
+            
+            <li>
+                <a href="http://obs.dimond.top/163_1776747657.mp4" target="_blank">163_1776747657.mp4</a> 
+                <span class="actions">
+                    <a href="http://obs.dimond.top/163_1776747657.mp4" download>下载</a>
+                    <button class="btn-delete" onclick="deleteFile('163_1776747657.mp4')" title="删除">🗑️</button>
+                </span>
+            </li>
+            
+            <li>
+                <a href="http://obs.dimond.top/159_1776747639.mp4" target="_blank">159_1776747639.mp4</a> 
+                <span class="actions">
+                    <a href="http://obs.dimond.top/159_1776747639.mp4" download>下载</a>
+                    <button class="btn-delete" onclick="deleteFile('159_1776747639.mp4')" title="删除">🗑️</button>
+                </span>
+            </li>
+            
+            <li>
+                <a href="http://obs.dimond.top/QQ842850240__00001_p84-audio_vnncg_1776767653.mp4" target="_blank">QQ842850240__00001_p84-audio_vnncg_1776767653.mp4</a> 
+                <span class="actions">
+                    <a href="http://obs.dimond.top/QQ842850240__00001_p84-audio_vnncg_1776767653.mp4" download>下载</a>
+                    <button class="btn-delete" onclick="deleteFile('QQ842850240__00001_p84-audio_vnncg_1776767653.mp4')" title="删除">🗑️</button>
+                </span>
+            </li>
+            
+            <li>
+                <a href="http://obs.dimond.top/80a8a44b0abf489881ed532a71e49965.mp4" target="_blank">80a8a44b0abf489881ed532a71e49965.mp4</a> 
+                <span class="actions">
+                    <a href="http://obs.dimond.top/80a8a44b0abf489881ed532a71e49965.mp4" download>下载</a>
+                    <button class="btn-delete" onclick="deleteFile('80a8a44b0abf489881ed532a71e49965.mp4')" title="删除">🗑️</button>
+                </span>
+            </li>
+            
+            <li>
+                <a href="http://obs.dimond.top/8bc6d27a83fe48e78fe50378e6753aee.mp4" target="_blank">8bc6d27a83fe48e78fe50378e6753aee.mp4</a> 
+                <span class="actions">
+                    <a href="http://obs.dimond.top/8bc6d27a83fe48e78fe50378e6753aee.mp4" download>下载</a>
+                    <button class="btn-delete" onclick="deleteFile('8bc6d27a83fe48e78fe50378e6753aee.mp4')" title="删除">🗑️</button>
+                </span>
+            </li>
+            
+            <li>
+                <a href="http://obs.dimond.top/18084-sam.zip" target="_blank">18084-sam.zip</a> 
+                <span class="actions">
+                    <a href="http://obs.dimond.top/18084-sam.zip" download>下载</a>
+                    <button class="btn-delete" onclick="deleteFile('18084-sam.zip')" title="删除">🗑️</button>
+                </span>
+            </li>
+            
+            <li>
+                <a href="http://obs.dimond.top/713818cad87940bf952d7b4913da1c15.mp4" target="_blank">713818cad87940bf952d7b4913da1c15.mp4</a> 
+                <span class="actions">
+                    <a href="http://obs.dimond.top/713818cad87940bf952d7b4913da1c15.mp4" download>下载</a>
+                    <button class="btn-delete" onclick="deleteFile('713818cad87940bf952d7b4913da1c15.mp4')" title="删除">🗑️</button>
+                </span>
+            </li>
+            
+            <li>
+                <a href="http://obs.dimond.top/4ccfcf88a14f4293a397a4d5c450a4df.mp4" target="_blank">4ccfcf88a14f4293a397a4d5c450a4df.mp4</a> 
+                <span class="actions">
+                    <a href="http://obs.dimond.top/4ccfcf88a14f4293a397a4d5c450a4df.mp4" download>下载</a>
+                    <button class="btn-delete" onclick="deleteFile('4ccfcf88a14f4293a397a4d5c450a4df.mp4')" title="删除">🗑️</button>
+                </span>
+            </li>
+            
+            <li>
+                <a href="http://obs.dimond.top/c112b415fd4848ac8121f01a35464363.mp4" target="_blank">c112b415fd4848ac8121f01a35464363.mp4</a> 
+                <span class="actions">
+                    <a href="http://obs.dimond.top/c112b415fd4848ac8121f01a35464363.mp4" download>下载</a>
+                    <button class="btn-delete" onclick="deleteFile('c112b415fd4848ac8121f01a35464363.mp4')" title="删除">🗑️</button>
+                </span>
+            </li>
+            
+            <li>
+                <a href="http://obs.dimond.top/4f04d43055374b4195c7ab83fbba5f15.mp4" target="_blank">4f04d43055374b4195c7ab83fbba5f15.mp4</a> 
+                <span class="actions">
+                    <a href="http://obs.dimond.top/4f04d43055374b4195c7ab83fbba5f15.mp4" download>下载</a>
+                    <button class="btn-delete" onclick="deleteFile('4f04d43055374b4195c7ab83fbba5f15.mp4')" title="删除">🗑️</button>
+                </span>
+            </li>
+            
+            <li>
+                <a href="http://obs.dimond.top/7b136aaa6218400d8ca5f2c820d1ac57.mp4" target="_blank">7b136aaa6218400d8ca5f2c820d1ac57.mp4</a> 
+                <span class="actions">
+                    <a href="http://obs.dimond.top/7b136aaa6218400d8ca5f2c820d1ac57.mp4" download>下载</a>
+                    <button class="btn-delete" onclick="deleteFile('7b136aaa6218400d8ca5f2c820d1ac57.mp4')" title="删除">🗑️</button>
+                </span>
+            </li>
+            
+            <li>
+                <a href="http://obs.dimond.top/b45a999cb7ff4e1db9c826868b11a09d.mp4" target="_blank">b45a999cb7ff4e1db9c826868b11a09d.mp4</a> 
+                <span class="actions">
+                    <a href="http://obs.dimond.top/b45a999cb7ff4e1db9c826868b11a09d.mp4" download>下载</a>
+                    <button class="btn-delete" onclick="deleteFile('b45a999cb7ff4e1db9c826868b11a09d.mp4')" title="删除">🗑️</button>
+                </span>
+            </li>
+            
+            <li>
+                <a href="http://obs.dimond.top/f4e608f503264088b2931ef7ed8787c6.mp4" target="_blank">f4e608f503264088b2931ef7ed8787c6.mp4</a> 
+                <span class="actions">
+                    <a href="http://obs.dimond.top/f4e608f503264088b2931ef7ed8787c6.mp4" download>下载</a>
+                    <button class="btn-delete" onclick="deleteFile('f4e608f503264088b2931ef7ed8787c6.mp4')" title="删除">🗑️</button>
+                </span>
+            </li>
+            
+            <li>
+                <a href="http://obs.dimond.top/a2825b608d784878b358c0c0cc5bce13.mp4" target="_blank">a2825b608d784878b358c0c0cc5bce13.mp4</a> 
+                <span class="actions">
+                    <a href="http://obs.dimond.top/a2825b608d784878b358c0c0cc5bce13.mp4" download>下载</a>
+                    <button class="btn-delete" onclick="deleteFile('a2825b608d784878b358c0c0cc5bce13.mp4')" title="删除">🗑️</button>
+                </span>
+            </li>
+            
+            <li>
+                <a href="http://obs.dimond.top/test_file.txt" target="_blank">test_file.txt</a> 
+                <span class="actions">
+                    <a href="http://obs.dimond.top/test_file.txt" download>下载</a>
+                    <button class="btn-delete" onclick="deleteFile('test_file.txt')" title="删除">🗑️</button>
+                </span>
+            </li>
+            
+            <li>
+                <a href="http://obs.dimond.top/90c6f2ef0a3f4ec5b22e83bf49e6c0eb.mp4" target="_blank">90c6f2ef0a3f4ec5b22e83bf49e6c0eb.mp4</a> 
+                <span class="actions">
+                    <a href="http://obs.dimond.top/90c6f2ef0a3f4ec5b22e83bf49e6c0eb.mp4" download>下载</a>
+                    <button class="btn-delete" onclick="deleteFile('90c6f2ef0a3f4ec5b22e83bf49e6c0eb.mp4')" title="删除">🗑️</button>
+                </span>
+            </li>
+            
+            <li>
+                <a href="http://obs.dimond.top/e35f91672a434bc0be1570235ff47d95.mp4" target="_blank">e35f91672a434bc0be1570235ff47d95.mp4</a> 
+                <span class="actions">
+                    <a href="http://obs.dimond.top/e35f91672a434bc0be1570235ff47d95.mp4" download>下载</a>
+                    <button class="btn-delete" onclick="deleteFile('e35f91672a434bc0be1570235ff47d95.mp4')" title="删除">🗑️</button>
+                </span>
+            </li>
+            
+            <li>
+                <a href="http://obs.dimond.top/sam3.pt" target="_blank">sam3.pt</a> 
+                <span class="actions">
+                    <a href="http://obs.dimond.top/sam3.pt" download>下载</a>
+                    <button class="btn-delete" onclick="deleteFile('sam3.pt')" title="删除">🗑️</button>
+                </span>
+            </li>
+            
+            <li>
+                <a href="http://obs.dimond.top/20260419145734公告板.txt" target="_blank">20260419145734公告板.txt</a> 
+                <span class="actions">
+                    <a href="http://obs.dimond.top/20260419145734公告板.txt" download>下载</a>
+                    <button class="btn-delete" onclick="deleteFile('20260419145734公告板.txt')" title="删除">🗑️</button>
+                </span>
+            </li>
+            
+            <li>
+                <a href="http://obs.dimond.top/luci-app-openclash_0.47.075_all.ipk" target="_blank">luci-app-openclash_0.47.075_all.ipk</a> 
+                <span class="actions">
+                    <a href="http://obs.dimond.top/luci-app-openclash_0.47.075_all.ipk" download>下载</a>
+                    <button class="btn-delete" onclick="deleteFile('luci-app-openclash_0.47.075_all.ipk')" title="删除">🗑️</button>
+                </span>
+            </li>
+            
+            <li>
+                <a href="http://obs.dimond.top/20260418181211公告板.txt" target="_blank">20260418181211公告板.txt</a> 
+                <span class="actions">
+                    <a href="http://obs.dimond.top/20260418181211公告板.txt" download>下载</a>
+                    <button class="btn-delete" onclick="deleteFile('20260418181211公告板.txt')" title="删除">🗑️</button>
+                </span>
+            </li>
+            
+            <li>
+                <a href="http://obs.dimond.top/20260418100954公告板.txt" target="_blank">20260418100954公告板.txt</a> 
+                <span class="actions">
+                    <a href="http://obs.dimond.top/20260418100954公告板.txt" download>下载</a>
+                    <button class="btn-delete" onclick="deleteFile('20260418100954公告板.txt')" title="删除">🗑️</button>
+                </span>
+            </li>
+            
+            <li>
+                <a href="http://obs.dimond.top/3ce6b279ab04dc5858143b999e522e2a._annotated.mp4" target="_blank">3ce6b279ab04dc5858143b999e522e2a._annotated.mp4</a> 
+                <span class="actions">
+                    <a href="http://obs.dimond.top/3ce6b279ab04dc5858143b999e522e2a._annotated.mp4" download>下载</a>
+                    <button class="btn-delete" onclick="deleteFile('3ce6b279ab04dc5858143b999e522e2a._annotated.mp4')" title="删除">🗑️</button>
+                </span>
+            </li>
+            
+            <li>
+                <a href="http://obs.dimond.top/20260417003104公告板.txt" target="_blank">20260417003104公告板.txt</a> 
+                <span class="actions">
+                    <a href="http://obs.dimond.top/20260417003104公告板.txt" download>下载</a>
+                    <button class="btn-delete" onclick="deleteFile('20260417003104公告板.txt')" title="删除">🗑️</button>
+                </span>
+            </li>
+            
+            <li>
+                <a href="http://obs.dimond.top/hermit claw 2.zip" target="_blank">hermit claw 2.zip</a> 
+                <span class="actions">
+                    <a href="http://obs.dimond.top/hermit claw 2.zip" download>下载</a>
+                    <button class="btn-delete" onclick="deleteFile('hermit claw 2.zip')" title="删除">🗑️</button>
+                </span>
+            </li>
+            
+            <li>
+                <a href="http://obs.dimond.top/Trae-darwin-arm64.dmg" target="_blank">Trae-darwin-arm64.dmg</a> 
+                <span class="actions">
+                    <a href="http://obs.dimond.top/Trae-darwin-arm64.dmg" download>下载</a>
+                    <button class="btn-delete" onclick="deleteFile('Trae-darwin-arm64.dmg')" title="删除">🗑️</button>
+                </span>
+            </li>
+            
+            <li>
+                <a href="http://obs.dimond.top/CRM.zip" target="_blank">CRM.zip</a> 
+                <span class="actions">
+                    <a href="http://obs.dimond.top/CRM.zip" download>下载</a>
+                    <button class="btn-delete" onclick="deleteFile('CRM.zip')" title="删除">🗑️</button>
+                </span>
+            </li>
+            
+            <li>
+                <a href="http://obs.dimond.top/pptx.zip" target="_blank">pptx.zip</a> 
+                <span class="actions">
+                    <a href="http://obs.dimond.top/pptx.zip" download>下载</a>
+                    <button class="btn-delete" onclick="deleteFile('pptx.zip')" title="删除">🗑️</button>
+                </span>
+            </li>
+            
+            <li>
+                <a href="http://obs.dimond.top/ams.zip" target="_blank">ams.zip</a> 
+                <span class="actions">
+                    <a href="http://obs.dimond.top/ams.zip" download>下载</a>
+                    <button class="btn-delete" onclick="deleteFile('ams.zip')" title="删除">🗑️</button>
+                </span>
+            </li>
+            
+            <li>
+                <a href="http://obs.dimond.top/video_2041355648620437505.mp4" target="_blank">video_2041355648620437505.mp4</a> 
+                <span class="actions">
+                    <a href="http://obs.dimond.top/video_2041355648620437505.mp4" download>下载</a>
+                    <button class="btn-delete" onclick="deleteFile('video_2041355648620437505.mp4')" title="删除">🗑️</button>
+                </span>
+            </li>
+            
+            <li>
+                <a href="http://obs.dimond.top/牛牛&水豚噜噜_动画职场喜剧.mp4" target="_blank">牛牛&水豚噜噜_动画职场喜剧.mp4</a> 
+                <span class="actions">
+                    <a href="http://obs.dimond.top/牛牛&水豚噜噜_动画职场喜剧.mp4" download>下载</a>
+                    <button class="btn-delete" onclick="deleteFile('牛牛&水豚噜噜_动画职场喜剧.mp4')" title="删除">🗑️</button>
+                </span>
+            </li>
+            
+            <li>
+                <a href="http://obs.dimond.top/video_2040828581545910274.mp4" target="_blank">video_2040828581545910274.mp4</a> 
+                <span class="actions">
+                    <a href="http://obs.dimond.top/video_2040828581545910274.mp4" download>下载</a>
+                    <button class="btn-delete" onclick="deleteFile('video_2040828581545910274.mp4')" title="删除">🗑️</button>
+                </span>
+            </li>
+            
+            <li>
+                <a href="http://obs.dimond.top/duck_2040298238317305857.mp4" target="_blank">duck_2040298238317305857.mp4</a> 
+                <span class="actions">
+                    <a href="http://obs.dimond.top/duck_2040298238317305857.mp4" download>下载</a>
+                    <button class="btn-delete" onclick="deleteFile('duck_2040298238317305857.mp4')" title="删除">🗑️</button>
+                </span>
+            </li>
+            
+            <li>
+                <a href="http://obs.dimond.top/video_2040298238317305857.mp4" target="_blank">video_2040298238317305857.mp4</a> 
+                <span class="actions">
+                    <a href="http://obs.dimond.top/video_2040298238317305857.mp4" download>下载</a>
+                    <button class="btn-delete" onclick="deleteFile('video_2040298238317305857.mp4')" title="删除">🗑️</button>
+                </span>
+            </li>
+            
+            <li>
+                <a href="http://obs.dimond.top/video_2040296476848103426.mp4" target="_blank">video_2040296476848103426.mp4</a> 
+                <span class="actions">
+                    <a href="http://obs.dimond.top/video_2040296476848103426.mp4" download>下载</a>
+                    <button class="btn-delete" onclick="deleteFile('video_2040296476848103426.mp4')" title="删除">🗑️</button>
+                </span>
+            </li>
+            
+            <li>
+                <a href="http://obs.dimond.top/result_2040291603322707970.png" target="_blank">result_2040291603322707970.png</a> 
+                <span class="actions">
+                    <a href="http://obs.dimond.top/result_2040291603322707970.png" download>下载</a>
+                    <button class="btn-delete" onclick="deleteFile('result_2040291603322707970.png')" title="删除">🗑️</button>
+                </span>
+            </li>
+            
+            <li>
+                <a href="http://obs.dimond.top/result_2040290996947914754.png" target="_blank">result_2040290996947914754.png</a> 
+                <span class="actions">
+                    <a href="http://obs.dimond.top/result_2040290996947914754.png" download>下载</a>
+                    <button class="btn-delete" onclick="deleteFile('result_2040290996947914754.png')" title="删除">🗑️</button>
+                </span>
+            </li>
+            
+            <li>
+                <a href="http://obs.dimond.top/style_2039711750013788161.png" target="_blank">style_2039711750013788161.png</a> 
+                <span class="actions">
+                    <a href="http://obs.dimond.top/style_2039711750013788161.png" download>下载</a>
+                    <button class="btn-delete" onclick="deleteFile('style_2039711750013788161.png')" title="删除">🗑️</button>
+                </span>
+            </li>
+            
+            <li>
+                <a href="http://obs.dimond.top/style_2039711314787573761.png" target="_blank">style_2039711314787573761.png</a> 
+                <span class="actions">
+                    <a href="http://obs.dimond.top/style_2039711314787573761.png" download>下载</a>
+                    <button class="btn-delete" onclick="deleteFile('style_2039711314787573761.png')" title="删除">🗑️</button>
+                </span>
+            </li>
+            
+            <li>
+                <a href="http://obs.dimond.top/style_2039707581676724225.png" target="_blank">style_2039707581676724225.png</a> 
+                <span class="actions">
+                    <a href="http://obs.dimond.top/style_2039707581676724225.png" download>下载</a>
+                    <button class="btn-delete" onclick="deleteFile('style_2039707581676724225.png')" title="删除">🗑️</button>
+                </span>
+            </li>
+            
+            <li>
+                <a href="http://obs.dimond.top/style_2039707460482240513.png" target="_blank">style_2039707460482240513.png</a> 
+                <span class="actions">
+                    <a href="http://obs.dimond.top/style_2039707460482240513.png" download>下载</a>
+                    <button class="btn-delete" onclick="deleteFile('style_2039707460482240513.png')" title="删除">🗑️</button>
+                </span>
+            </li>
+            
+            <li>
+                <a href="http://obs.dimond.top/style_2039707199592407042.png" target="_blank">style_2039707199592407042.png</a> 
+                <span class="actions">
+                    <a href="http://obs.dimond.top/style_2039707199592407042.png" download>下载</a>
+                    <button class="btn-delete" onclick="deleteFile('style_2039707199592407042.png')" title="删除">🗑️</button>
+                </span>
+            </li>
+            
+            <li>
+                <a href="http://obs.dimond.top/style_2039707004355878913.png" target="_blank">style_2039707004355878913.png</a> 
+                <span class="actions">
+                    <a href="http://obs.dimond.top/style_2039707004355878913.png" download>下载</a>
+                    <button class="btn-delete" onclick="deleteFile('style_2039707004355878913.png')" title="删除">🗑️</button>
+                </span>
+            </li>
+            
+            <li>
+                <a href="http://obs.dimond.top/style_2039706627397070850.png" target="_blank">style_2039706627397070850.png</a> 
+                <span class="actions">
+                    <a href="http://obs.dimond.top/style_2039706627397070850.png" download>下载</a>
+                    <button class="btn-delete" onclick="deleteFile('style_2039706627397070850.png')" title="删除">🗑️</button>
+                </span>
+            </li>
+            
+            <li>
+                <a href="http://obs.dimond.top/style_2039695149440835585.png" target="_blank">style_2039695149440835585.png</a> 
+                <span class="actions">
+                    <a href="http://obs.dimond.top/style_2039695149440835585.png" download>下载</a>
+                    <button class="btn-delete" onclick="deleteFile('style_2039695149440835585.png')" title="删除">🗑️</button>
+                </span>
+            </li>
+            
+            <li>
+                <a href="http://obs.dimond.top/20260402132130公告板.txt" target="_blank">20260402132130公告板.txt</a> 
+                <span class="actions">
+                    <a href="http://obs.dimond.top/20260402132130公告板.txt" download>下载</a>
+                    <button class="btn-delete" onclick="deleteFile('20260402132130公告板.txt')" title="删除">🗑️</button>
+                </span>
+            </li>
+            
+            <li>
+                <a href="http://obs.dimond.top/风格迁移.zip" target="_blank">风格迁移.zip</a> 
+                <span class="actions">
+                    <a href="http://obs.dimond.top/风格迁移.zip" download>下载</a>
+                    <button class="btn-delete" onclick="deleteFile('风格迁移.zip')" title="删除">🗑️</button>
+                </span>
+            </li>
+            
+            <li>
+                <a href="http://obs.dimond.top/video_2039526379145601026.mp4" target="_blank">video_2039526379145601026.mp4</a> 
+                <span class="actions">
+                    <a href="http://obs.dimond.top/video_2039526379145601026.mp4" download>下载</a>
+                    <button class="btn-delete" onclick="deleteFile('video_2039526379145601026.mp4')" title="删除">🗑️</button>
+                </span>
+            </li>
+            
+            <li>
+                <a href="http://obs.dimond.top/video_2039515399548178433.mp4" target="_blank">video_2039515399548178433.mp4</a> 
+                <span class="actions">
+                    <a href="http://obs.dimond.top/video_2039515399548178433.mp4" download>下载</a>
+                    <button class="btn-delete" onclick="deleteFile('video_2039515399548178433.mp4')" title="删除">🗑️</button>
+                </span>
+            </li>
+            
+            <li>
+                <a href="http://obs.dimond.top/drone_night_market.png" target="_blank">drone_night_market.png</a> 
+                <span class="actions">
+                    <a href="http://obs.dimond.top/drone_night_market.png" download>下载</a>
+                    <button class="btn-delete" onclick="deleteFile('drone_night_market.png')" title="删除">🗑️</button>
+                </span>
+            </li>
+            
+            <li>
+                <a href="http://obs.dimond.top/chongqing-cyberpunk-start.png" target="_blank">chongqing-cyberpunk-start.png</a> 
+                <span class="actions">
+                    <a href="http://obs.dimond.top/chongqing-cyberpunk-start.png" download>下载</a>
+                    <button class="btn-delete" onclick="deleteFile('chongqing-cyberpunk-start.png')" title="删除">🗑️</button>
+                </span>
+            </li>
+            
+            <li>
+                <a href="http://obs.dimond.top/dream_girl2.png" target="_blank">dream_girl2.png</a> 
+                <span class="actions">
+                    <a href="http://obs.dimond.top/dream_girl2.png" download>下载</a>
+                    <button class="btn-delete" onclick="deleteFile('dream_girl2.png')" title="删除">🗑️</button>
+                </span>
+            </li>
+            
+            <li>
+                <a href="http://obs.dimond.top/20260401150621公告板.txt" target="_blank">20260401150621公告板.txt</a> 
+                <span class="actions">
+                    <a href="http://obs.dimond.top/20260401150621公告板.txt" download>下载</a>
+                    <button class="btn-delete" onclick="deleteFile('20260401150621公告板.txt')" title="删除">🗑️</button>
+                </span>
+            </li>
+            
+            <li>
+                <a href="http://obs.dimond.top/video_2039348702962913282.mp4" target="_blank">video_2039348702962913282.mp4</a> 
+                <span class="actions">
+                    <a href="http://obs.dimond.top/video_2039348702962913282.mp4" download>下载</a>
+                    <button class="btn-delete" onclick="deleteFile('video_2039348702962913282.mp4')" title="删除">🗑️</button>
+                </span>
+            </li>
+            
+            <li>
+                <a href="http://obs.dimond.top/dream_girl.png" target="_blank">dream_girl.png</a> 
+                <span class="actions">
+                    <a href="http://obs.dimond.top/dream_girl.png" download>下载</a>
+                    <button class="btn-delete" onclick="deleteFile('dream_girl.png')" title="删除">🗑️</button>
+                </span>
+            </li>
+            
+            <li>
+                <a href="http://obs.dimond.top/video_2039344661033857026.mp4" target="_blank">video_2039344661033857026.mp4</a> 
+                <span class="actions">
+                    <a href="http://obs.dimond.top/video_2039344661033857026.mp4" download>下载</a>
+                    <button class="btn-delete" onclick="deleteFile('video_2039344661033857026.mp4')" title="删除">🗑️</button>
+                </span>
+            </li>
+            
+            <li>
+                <a href="http://obs.dimond.top/test_video_input.png" target="_blank">test_video_input.png</a> 
+                <span class="actions">
+                    <a href="http://obs.dimond.top/test_video_input.png" download>下载</a>
+                    <button class="btn-delete" onclick="deleteFile('test_video_input.png')" title="删除">🗑️</button>
+                </span>
+            </li>
+            
+            <li>
+                <a href="http://obs.dimond.top/input.png" target="_blank">input.png</a> 
+                <span class="actions">
+                    <a href="http://obs.dimond.top/input.png" download>下载</a>
+                    <button class="btn-delete" onclick="deleteFile('input.png')" title="删除">🗑️</button>
+                </span>
+            </li>
+            
+            <li>
+                <a href="http://obs.dimond.top/result_1775050842" target="_blank">result_1775050842</a> 
+                <span class="actions">
+                    <a href="http://obs.dimond.top/result_1775050842" download>下载</a>
+                    <button class="btn-delete" onclick="deleteFile('result_1775050842')" title="删除">🗑️</button>
+                </span>
+            </li>
+            
+            <li>
+                <a href="http://obs.dimond.top/record.m4a" target="_blank">record.m4a</a> 
+                <span class="actions">
+                    <a href="http://obs.dimond.top/record.m4a" download>下载</a>
+                    <button class="btn-delete" onclick="deleteFile('record.m4a')" title="删除">🗑️</button>
+                </span>
+            </li>
+            
+            <li>
+                <a href="http://obs.dimond.top/20260401113514公告板.txt" target="_blank">20260401113514公告板.txt</a> 
+                <span class="actions">
+                    <a href="http://obs.dimond.top/20260401113514公告板.txt" download>下载</a>
+                    <button class="btn-delete" onclick="deleteFile('20260401113514公告板.txt')" title="删除">🗑️</button>
+                </span>
+            </li>
+            
+            <li>
+                <a href="http://obs.dimond.top/petstream2.png" target="_blank">petstream2.png</a> 
+                <span class="actions">
+                    <a href="http://obs.dimond.top/petstream2.png" download>下载</a>
+                    <button class="btn-delete" onclick="deleteFile('petstream2.png')" title="删除">🗑️</button>
+                </span>
+            </li>
+            
+            <li>
+                <a href="http://obs.dimond.top/petstream1.png" target="_blank">petstream1.png</a> 
+                <span class="actions">
+                    <a href="http://obs.dimond.top/petstream1.png" download>下载</a>
+                    <button class="btn-delete" onclick="deleteFile('petstream1.png')" title="删除">🗑️</button>
+                </span>
+            </li>
+            
+            <li>
+                <a href="http://obs.dimond.top/pet_live_2038861406350221313.png" target="_blank">pet_live_2038861406350221313.png</a> 
+                <span class="actions">
+                    <a href="http://obs.dimond.top/pet_live_2038861406350221313.png" download>下载</a>
+                    <button class="btn-delete" onclick="deleteFile('pet_live_2038861406350221313.png')" title="删除">🗑️</button>
+                </span>
+            </li>
+            
+            <li>
+                <a href="http://obs.dimond.top/pet_live_2038858346802655233.png" target="_blank">pet_live_2038858346802655233.png</a> 
+                <span class="actions">
+                    <a href="http://obs.dimond.top/pet_live_2038858346802655233.png" download>下载</a>
+                    <button class="btn-delete" onclick="deleteFile('pet_live_2038858346802655233.png')" title="删除">🗑️</button>
+                </span>
+            </li>
+            
+            <li>
+                <a href="http://obs.dimond.top/pet_live_2038855591081938945.png" target="_blank">pet_live_2038855591081938945.png</a> 
+                <span class="actions">
+                    <a href="http://obs.dimond.top/pet_live_2038855591081938945.png" download>下载</a>
+                    <button class="btn-delete" onclick="deleteFile('pet_live_2038855591081938945.png')" title="删除">🗑️</button>
+                </span>
+            </li>
+            
+            <li>
+                <a href="http://obs.dimond.top/我的刀钝.jpeg" target="_blank">我的刀钝.jpeg</a> 
+                <span class="actions">
+                    <a href="http://obs.dimond.top/我的刀钝.jpeg" download>下载</a>
+                    <button class="btn-delete" onclick="deleteFile('我的刀钝.jpeg')" title="删除">🗑️</button>
+                </span>
+            </li>
+            
+            <li>
+                <a href="http://obs.dimond.top/水豚噜噜.jpeg" target="_blank">水豚噜噜.jpeg</a> 
+                <span class="actions">
+                    <a href="http://obs.dimond.top/水豚噜噜.jpeg" download>下载</a>
+                    <button class="btn-delete" onclick="deleteFile('水豚噜噜.jpeg')" title="删除">🗑️</button>
+                </span>
+            </li>
+            
+            <li>
+                <a href="http://obs.dimond.top/pet_live_2038831361833512961.png" target="_blank">pet_live_2038831361833512961.png</a> 
+                <span class="actions">
+                    <a href="http://obs.dimond.top/pet_live_2038831361833512961.png" download>下载</a>
+                    <button class="btn-delete" onclick="deleteFile('pet_live_2038831361833512961.png')" title="删除">🗑️</button>
+                </span>
+            </li>
+            
+            <li>
+                <a href="http://obs.dimond.top/pet_live_2038828852914102273.png" target="_blank">pet_live_2038828852914102273.png</a> 
+                <span class="actions">
+                    <a href="http://obs.dimond.top/pet_live_2038828852914102273.png" download>下载</a>
+                    <button class="btn-delete" onclick="deleteFile('pet_live_2038828852914102273.png')" title="删除">🗑️</button>
+                </span>
+            </li>
+            
+            <li>
+                <a href="http://obs.dimond.top/pet_live_2038825644485451778.png" target="_blank">pet_live_2038825644485451778.png</a> 
+                <span class="actions">
+                    <a href="http://obs.dimond.top/pet_live_2038825644485451778.png" download>下载</a>
+                    <button class="btn-delete" onclick="deleteFile('pet_live_2038825644485451778.png')" title="删除">🗑️</button>
+                </span>
+            </li>
+            
+            <li>
+                <a href="http://obs.dimond.top/20260331023504公告板.txt" target="_blank">20260331023504公告板.txt</a> 
+                <span class="actions">
+                    <a href="http://obs.dimond.top/20260331023504公告板.txt" download>下载</a>
+                    <button class="btn-delete" onclick="deleteFile('20260331023504公告板.txt')" title="删除">🗑️</button>
+                </span>
+            </li>
+            
+            <li>
+                <a href="http://obs.dimond.top/胖胖.png" target="_blank">胖胖.png</a> 
+                <span class="actions">
+                    <a href="http://obs.dimond.top/胖胖.png" download>下载</a>
+                    <button class="btn-delete" onclick="deleteFile('胖胖.png')" title="删除">🗑️</button>
+                </span>
+            </li>
+            
+            <li>
+                <a href="http://obs.dimond.top/豆汁儿.png" target="_blank">豆汁儿.png</a> 
+                <span class="actions">
+                    <a href="http://obs.dimond.top/豆汁儿.png" download>下载</a>
+                    <button class="btn-delete" onclick="deleteFile('豆汁儿.png')" title="删除">🗑️</button>
+                </span>
+            </li>
+            
+            <li>
+                <a href="http://obs.dimond.top/熊二.wav" target="_blank">熊二.wav</a> 
+                <span class="actions">
+                    <a href="http://obs.dimond.top/熊二.wav" download>下载</a>
+                    <button class="btn-delete" onclick="deleteFile('熊二.wav')" title="删除">🗑️</button>
+                </span>
+            </li>
+            
+            <li>
+                <a href="http://obs.dimond.top/ai-image-analyzer-8900.zip" target="_blank">ai-image-analyzer-8900.zip</a> 
+                <span class="actions">
+                    <a href="http://obs.dimond.top/ai-image-analyzer-8900.zip" download>下载</a>
+                    <button class="btn-delete" onclick="deleteFile('ai-image-analyzer-8900.zip')" title="删除">🗑️</button>
+                </span>
+            </li>
+            
+            <li>
+                <a href="http://obs.dimond.top/SOUL.md" target="_blank">SOUL.md</a> 
+                <span class="actions">
+                    <a href="http://obs.dimond.top/SOUL.md" download>下载</a>
+                    <button class="btn-delete" onclick="deleteFile('SOUL.md')" title="删除">🗑️</button>
+                </span>
+            </li>
+            
+            <li>
+                <a href="http://obs.dimond.top/ClashX.Meta (1).zip" target="_blank">ClashX.Meta (1).zip</a> 
+                <span class="actions">
+                    <a href="http://obs.dimond.top/ClashX.Meta (1).zip" download>下载</a>
+                    <button class="btn-delete" onclick="deleteFile('ClashX.Meta (1).zip')" title="删除">🗑️</button>
+                </span>
+            </li>
+            
+            <li>
+                <a href="http://obs.dimond.top/中科大一键安装brew (1).txt" target="_blank">中科大一键安装brew (1).txt</a> 
+                <span class="actions">
+                    <a href="http://obs.dimond.top/中科大一键安装brew (1).txt" download>下载</a>
+                    <button class="btn-delete" onclick="deleteFile('中科大一键安装brew (1).txt')" title="删除">🗑️</button>
+                </span>
+            </li>
+            
+            <li>
+                <a href="http://obs.dimond.top/sockd.conf" target="_blank">sockd.conf</a> 
+                <span class="actions">
+                    <a href="http://obs.dimond.top/sockd.conf" download>下载</a>
+                    <button class="btn-delete" onclick="deleteFile('sockd.conf')" title="删除">🗑️</button>
+                </span>
+            </li>
+            
+            <li>
+                <a href="http://obs.dimond.top/frpc.ini" target="_blank">frpc.ini</a> 
+                <span class="actions">
+                    <a href="http://obs.dimond.top/frpc.ini" download>下载</a>
+                    <button class="btn-delete" onclick="deleteFile('frpc.ini')" title="删除">🗑️</button>
+                </span>
+            </li>
+            
+            <li>
+                <a href="http://obs.dimond.top/20260322033347公告板.txt" target="_blank">20260322033347公告板.txt</a> 
+                <span class="actions">
+                    <a href="http://obs.dimond.top/20260322033347公告板.txt" download>下载</a>
+                    <button class="btn-delete" onclick="deleteFile('20260322033347公告板.txt')" title="删除">🗑️</button>
+                </span>
+            </li>
+            
+            <li>
+                <a href="http://obs.dimond.top/20260322033338公告板.txt" target="_blank">20260322033338公告板.txt</a> 
+                <span class="actions">
+                    <a href="http://obs.dimond.top/20260322033338公告板.txt" download>下载</a>
+                    <button class="btn-delete" onclick="deleteFile('20260322033338公告板.txt')" title="删除">🗑️</button>
+                </span>
+            </li>
+            
+            <li>
+                <a href="http://obs.dimond.top/config" target="_blank">config</a> 
+                <span class="actions">
+                    <a href="http://obs.dimond.top/config" download>下载</a>
+                    <button class="btn-delete" onclick="deleteFile('config')" title="删除">🗑️</button>
+                </span>
+            </li>
+            
+            <li>
+                <a href="http://obs.dimond.top/zzsrv-openwrt-full.tar" target="_blank">zzsrv-openwrt-full.tar</a> 
+                <span class="actions">
+                    <a href="http://obs.dimond.top/zzsrv-openwrt-full.tar" download>下载</a>
+                    <button class="btn-delete" onclick="deleteFile('zzsrv-openwrt-full.tar')" title="删除">🗑️</button>
+                </span>
+            </li>
+            
+            <li>
+                <a href="http://obs.dimond.top/zzsrv-openwrt.tar" target="_blank">zzsrv-openwrt.tar</a> 
+                <span class="actions">
+                    <a href="http://obs.dimond.top/zzsrv-openwrt.tar" download>下载</a>
+                    <button class="btn-delete" onclick="deleteFile('zzsrv-openwrt.tar')" title="删除">🗑️</button>
+                </span>
+            </li>
+            
+            <li>
+                <a href="http://obs.dimond.top/OpenWrt-Docker.zip" target="_blank">OpenWrt-Docker.zip</a> 
+                <span class="actions">
+                    <a href="http://obs.dimond.top/OpenWrt-Docker.zip" download>下载</a>
+                    <button class="btn-delete" onclick="deleteFile('OpenWrt-Docker.zip')" title="删除">🗑️</button>
+                </span>
+            </li>
+            
+            <li>
+                <a href="http://obs.dimond.top/Git-2.53.0.2-64-bit.exe" target="_blank">Git-2.53.0.2-64-bit.exe</a> 
+                <span class="actions">
+                    <a href="http://obs.dimond.top/Git-2.53.0.2-64-bit.exe" download>下载</a>
+                    <button class="btn-delete" onclick="deleteFile('Git-2.53.0.2-64-bit.exe')" title="删除">🗑️</button>
+                </span>
+            </li>
+            
+            <li>
+                <a href="http://obs.dimond.top/软妹.wav" target="_blank">软妹.wav</a> 
+                <span class="actions">
+                    <a href="http://obs.dimond.top/软妹.wav" download>下载</a>
+                    <button class="btn-delete" onclick="deleteFile('软妹.wav')" title="删除">🗑️</button>
+                </span>
+            </li>
+            
+            <li>
+                <a href="http://obs.dimond.top/ScreenRecording_03-20-2026 15-19-41_1.mp4" target="_blank">ScreenRecording_03-20-2026 15-19-41_1.mp4</a> 
+                <span class="actions">
+                    <a href="http://obs.dimond.top/ScreenRecording_03-20-2026 15-19-41_1.mp4" download>下载</a>
+                    <button class="btn-delete" onclick="deleteFile('ScreenRecording_03-20-2026 15-19-41_1.mp4')" title="删除">🗑️</button>
+                </span>
+            </li>
+            
+            <li>
+                <a href="http://obs.dimond.top/lottery-picker-skill.zip" target="_blank">lottery-picker-skill.zip</a> 
+                <span class="actions">
+                    <a href="http://obs.dimond.top/lottery-picker-skill.zip" download>下载</a>
+                    <button class="btn-delete" onclick="deleteFile('lottery-picker-skill.zip')" title="删除">🗑️</button>
+                </span>
+            </li>
+            
+            <li>
+                <a href="http://obs.dimond.top/voice_alloy.zip" target="_blank">voice_alloy.zip</a> 
+                <span class="actions">
+                    <a href="http://obs.dimond.top/voice_alloy.zip" download>下载</a>
+                    <button class="btn-delete" onclick="deleteFile('voice_alloy.zip')" title="删除">🗑️</button>
+                </span>
+            </li>
+            
+            <li>
+                <a href="http://obs.dimond.top/USER.md" target="_blank">USER.md</a> 
+                <span class="actions">
+                    <a href="http://obs.dimond.top/USER.md" download>下载</a>
+                    <button class="btn-delete" onclick="deleteFile('USER.md')" title="删除">🗑️</button>
+                </span>
+            </li>
+            
+            <li>
+                <a href="http://obs.dimond.top/email-sender-skill.zip" target="_blank">email-sender-skill.zip</a> 
+                <span class="actions">
+                    <a href="http://obs.dimond.top/email-sender-skill.zip" download>下载</a>
+                    <button class="btn-delete" onclick="deleteFile('email-sender-skill.zip')" title="删除">🗑️</button>
+                </span>
+            </li>
+            
+            <li>
+                <a href="http://obs.dimond.top/email-sender.zip" target="_blank">email-sender.zip</a> 
+                <span class="actions">
+                    <a href="http://obs.dimond.top/email-sender.zip" download>下载</a>
+                    <button class="btn-delete" onclick="deleteFile('email-sender.zip')" title="删除">🗑️</button>
+                </span>
+            </li>
+            
+            <li>
+                <a href="http://obs.dimond.top/macos-screenshot.zip" target="_blank">macos-screenshot.zip</a> 
+                <span class="actions">
+                    <a href="http://obs.dimond.top/macos-screenshot.zip" download>下载</a>
+                    <button class="btn-delete" onclick="deleteFile('macos-screenshot.zip')" title="删除">🗑️</button>
+                </span>
+            </li>
+            
+            <li>
+                <a href="http://obs.dimond.top/AAA-image-understand.zip" target="_blank">AAA-image-understand.zip</a> 
+                <span class="actions">
+                    <a href="http://obs.dimond.top/AAA-image-understand.zip" download>下载</a>
+                    <button class="btn-delete" onclick="deleteFile('AAA-image-understand.zip')" title="删除">🗑️</button>
+                </span>
+            </li>
+            
+            <li>
+                <a href="http://obs.dimond.top/README.md" target="_blank">README.md</a> 
+                <span class="actions">
+                    <a href="http://obs.dimond.top/README.md" download>下载</a>
+                    <button class="btn-delete" onclick="deleteFile('README.md')" title="删除">🗑️</button>
+                </span>
+            </li>
+            
+            <li>
+                <a href="http://obs.dimond.top/skills.zip" target="_blank">skills.zip</a> 
+                <span class="actions">
+                    <a href="http://obs.dimond.top/skills.zip" download>下载</a>
+                    <button class="btn-delete" onclick="deleteFile('skills.zip')" title="删除">🗑️</button>
+                </span>
+            </li>
+            
+            <li>
+                <a href="http://obs.dimond.top/20260315051630公告板.txt" target="_blank">20260315051630公告板.txt</a> 
+                <span class="actions">
+                    <a href="http://obs.dimond.top/20260315051630公告板.txt" download>下载</a>
+                    <button class="btn-delete" onclick="deleteFile('20260315051630公告板.txt')" title="删除">🗑️</button>
+                </span>
+            </li>
+            
+            <li>
+                <a href="http://obs.dimond.top/20260315045946公告板.txt" target="_blank">20260315045946公告板.txt</a> 
+                <span class="actions">
+                    <a href="http://obs.dimond.top/20260315045946公告板.txt" download>下载</a>
+                    <button class="btn-delete" onclick="deleteFile('20260315045946公告板.txt')" title="删除">🗑️</button>
+                </span>
+            </li>
+            
+            <li>
+                <a href="http://obs.dimond.top/20260315044747公告板.txt" target="_blank">20260315044747公告板.txt</a> 
+                <span class="actions">
+                    <a href="http://obs.dimond.top/20260315044747公告板.txt" download>下载</a>
+                    <button class="btn-delete" onclick="deleteFile('20260315044747公告板.txt')" title="删除">🗑️</button>
+                </span>
+            </li>
+            
+            <li>
+                <a href="http://obs.dimond.top/20260315041816公告板.txt" target="_blank">20260315041816公告板.txt</a> 
+                <span class="actions">
+                    <a href="http://obs.dimond.top/20260315041816公告板.txt" download>下载</a>
+                    <button class="btn-delete" onclick="deleteFile('20260315041816公告板.txt')" title="删除">🗑️</button>
+                </span>
+            </li>
+            
+            <li>
+                <a href="http://obs.dimond.top/node-v24.14.0.pkg" target="_blank">node-v24.14.0.pkg</a> 
+                <span class="actions">
+                    <a href="http://obs.dimond.top/node-v24.14.0.pkg" download>下载</a>
+                    <button class="btn-delete" onclick="deleteFile('node-v24.14.0.pkg')" title="删除">🗑️</button>
+                </span>
+            </li>
+            
+            <li>
+                <a href="http://obs.dimond.top/ltx-2-19b-distilled_Q4_K_M.gguf" target="_blank">ltx-2-19b-distilled_Q4_K_M.gguf</a> 
+                <span class="actions">
+                    <a href="http://obs.dimond.top/ltx-2-19b-distilled_Q4_K_M.gguf" download>下载</a>
+                    <button class="btn-delete" onclick="deleteFile('ltx-2-19b-distilled_Q4_K_M.gguf')" title="删除">🗑️</button>
+                </span>
+            </li>
+            
+            <li>
+                <a href="http://obs.dimond.top/20260314174441公告板.txt" target="_blank">20260314174441公告板.txt</a> 
+                <span class="actions">
+                    <a href="http://obs.dimond.top/20260314174441公告板.txt" download>下载</a>
+                    <button class="btn-delete" onclick="deleteFile('20260314174441公告板.txt')" title="删除">🗑️</button>
+                </span>
+            </li>
+            
+            <li>
+                <a href="http://obs.dimond.top/screenshot.png" target="_blank">screenshot.png</a> 
+                <span class="actions">
+                    <a href="http://obs.dimond.top/screenshot.png" download>下载</a>
+                    <button class="btn-delete" onclick="deleteFile('screenshot.png')" title="删除">🗑️</button>
+                </span>
+            </li>
+            
+            <li>
+                <a href="http://obs.dimond.top/LTX-2 GGUF量化版文生视频.json" target="_blank">LTX-2 GGUF量化版文生视频.json</a> 
+                <span class="actions">
+                    <a href="http://obs.dimond.top/LTX-2 GGUF量化版文生视频.json" download>下载</a>
+                    <button class="btn-delete" onclick="deleteFile('LTX-2 GGUF量化版文生视频.json')" title="删除">🗑️</button>
+                </span>
+            </li>
+            
+            <li>
+                <a href="http://obs.dimond.top/c3af59d9_heygem.mp4" target="_blank">c3af59d9_heygem.mp4</a> 
+                <span class="actions">
+                    <a href="http://obs.dimond.top/c3af59d9_heygem.mp4" download>下载</a>
+                    <button class="btn-delete" onclick="deleteFile('c3af59d9_heygem.mp4')" title="删除">🗑️</button>
+                </span>
+            </li>
+            
+            <li>
+                <a href="http://obs.dimond.top/MEMORY.md" target="_blank">MEMORY.md</a> 
+                <span class="actions">
+                    <a href="http://obs.dimond.top/MEMORY.md" download>下载</a>
+                    <button class="btn-delete" onclick="deleteFile('MEMORY.md')" title="删除">🗑️</button>
+                </span>
+            </li>
+            
+            <li>
+                <a href="http://obs.dimond.top/video_1773301495.mov" target="_blank">video_1773301495.mov</a> 
+                <span class="actions">
+                    <a href="http://obs.dimond.top/video_1773301495.mov" download>下载</a>
+                    <button class="btn-delete" onclick="deleteFile('video_1773301495.mov')" title="删除">🗑️</button>
+                </span>
+            </li>
+            
+            <li>
+                <a href="http://obs.dimond.top/video.mov" target="_blank">video.mov</a> 
+                <span class="actions">
+                    <a href="http://obs.dimond.top/video.mov" download>下载</a>
+                    <button class="btn-delete" onclick="deleteFile('video.mov')" title="删除">🗑️</button>
+                </span>
+            </li>
+            
+            <li>
+                <a href="http://obs.dimond.top/868233a4_heygem.mp4" target="_blank">868233a4_heygem.mp4</a> 
+                <span class="actions">
+                    <a href="http://obs.dimond.top/868233a4_heygem.mp4" download>下载</a>
+                    <button class="btn-delete" onclick="deleteFile('868233a4_heygem.mp4')" title="删除">🗑️</button>
+                </span>
+            </li>
+            
+            <li>
+                <a href="http://obs.dimond.top/8099.zip" target="_blank">8099.zip</a> 
+                <span class="actions">
+                    <a href="http://obs.dimond.top/8099.zip" download>下载</a>
+                    <button class="btn-delete" onclick="deleteFile('8099.zip')" title="删除">🗑️</button>
+                </span>
+            </li>
+            
+            <li>
+                <a href="http://obs.dimond.top/AAA-skills.tar" target="_blank">AAA-skills.tar</a> 
+                <span class="actions">
+                    <a href="http://obs.dimond.top/AAA-skills.tar" download>下载</a>
+                    <button class="btn-delete" onclick="deleteFile('AAA-skills.tar')" title="删除">🗑️</button>
+                </span>
+            </li>
+            
+            <li>
+                <a href="http://obs.dimond.top/视频换人video_wan2_2_14B_animate.json" target="_blank">视频换人video_wan2_2_14B_animate.json</a> 
+                <span class="actions">
+                    <a href="http://obs.dimond.top/视频换人video_wan2_2_14B_animate.json" download>下载</a>
+                    <button class="btn-delete" onclick="deleteFile('视频换人video_wan2_2_14B_animate.json')" title="删除">🗑️</button>
+                </span>
+            </li>
+            
+            <li>
+                <a href="http://obs.dimond.top/视频换人2video_wan_vace_14B_v2v.json" target="_blank">视频换人2video_wan_vace_14B_v2v.json</a> 
+                <span class="actions">
+                    <a href="http://obs.dimond.top/视频换人2video_wan_vace_14B_v2v.json" download>下载</a>
+                    <button class="btn-delete" onclick="deleteFile('视频换人2video_wan_vace_14B_v2v.json')" title="删除">🗑️</button>
+                </span>
+            </li>
+            
+            <li>
+                <a href="http://obs.dimond.top/真人换动漫.json" target="_blank">真人换动漫.json</a> 
+                <span class="actions">
+                    <a href="http://obs.dimond.top/真人换动漫.json" download>下载</a>
+                    <button class="btn-delete" onclick="deleteFile('真人换动漫.json')" title="删除">🗑️</button>
+                </span>
+            </li>
+            
+            <li>
+                <a href="http://obs.dimond.top/数字人video_humo.json" target="_blank">数字人video_humo.json</a> 
+                <span class="actions">
+                    <a href="http://obs.dimond.top/数字人video_humo.json" download>下载</a>
+                    <button class="btn-delete" onclick="deleteFile('数字人video_humo.json')" title="删除">🗑️</button>
+                </span>
+            </li>
+            
+            <li>
+                <a href="http://obs.dimond.top/收尾帧wan2.1_flf2v_720_f16.json" target="_blank">收尾帧wan2.1_flf2v_720_f16.json</a> 
+                <span class="actions">
+                    <a href="http://obs.dimond.top/收尾帧wan2.1_flf2v_720_f16.json" download>下载</a>
+                    <button class="btn-delete" onclick="deleteFile('收尾帧wan2.1_flf2v_720_f16.json')" title="删除">🗑️</button>
+                </span>
+            </li>
+            
+            <li>
+                <a href="http://obs.dimond.top/扩展视频到音频长度.json" target="_blank">扩展视频到音频长度.json</a> 
+                <span class="actions">
+                    <a href="http://obs.dimond.top/扩展视频到音频长度.json" download>下载</a>
+                    <button class="btn-delete" onclick="deleteFile('扩展视频到音频长度.json')" title="删除">🗑️</button>
+                </span>
+            </li>
+            
+            <li>
+                <a href="http://obs.dimond.top/图生视频video_wan2_2_14B_i2v.json" target="_blank">图生视频video_wan2_2_14B_i2v.json</a> 
+                <span class="actions">
+                    <a href="http://obs.dimond.top/图生视频video_wan2_2_14B_i2v.json" download>下载</a>
+                    <button class="btn-delete" onclick="deleteFile('图生视频video_wan2_2_14B_i2v.json')" title="删除">🗑️</button>
+                </span>
+            </li>
+            
+            <li>
+                <a href="http://obs.dimond.top/audio_workflow.json" target="_blank">audio_workflow.json</a> 
+                <span class="actions">
+                    <a href="http://obs.dimond.top/audio_workflow.json" download>下载</a>
+                    <button class="btn-delete" onclick="deleteFile('audio_workflow.json')" title="删除">🗑️</button>
+                </span>
+            </li>
+            
+            <li>
+                <a href="http://obs.dimond.top/AAA-jims-Mac-mini-20260310.zip" target="_blank">AAA-jims-Mac-mini-20260310.zip</a> 
+                <span class="actions">
+                    <a href="http://obs.dimond.top/AAA-jims-Mac-mini-20260310.zip" download>下载</a>
+                    <button class="btn-delete" onclick="deleteFile('AAA-jims-Mac-mini-20260310.zip')" title="删除">🗑️</button>
+                </span>
+            </li>
+            
+            <li>
+                <a href="http://obs.dimond.top/AAA_gpu_20260310.zip" target="_blank">AAA_gpu_20260310.zip</a> 
+                <span class="actions">
+                    <a href="http://obs.dimond.top/AAA_gpu_20260310.zip" download>下载</a>
+                    <button class="btn-delete" onclick="deleteFile('AAA_gpu_20260310.zip')" title="删除">🗑️</button>
+                </span>
+            </li>
+            
+            <li>
+                <a href="http://obs.dimond.top/AAA-openclaw-browser-relay.crx" target="_blank">AAA-openclaw-browser-relay.crx</a> 
+                <span class="actions">
+                    <a href="http://obs.dimond.top/AAA-openclaw-browser-relay.crx" download>下载</a>
+                    <button class="btn-delete" onclick="deleteFile('AAA-openclaw-browser-relay.crx')" title="删除">🗑️</button>
+                </span>
+            </li>
+            
+            <li>
+                <a href="http://obs.dimond.top/AAA_obs_file_manager.zip" target="_blank">AAA_obs_file_manager.zip</a> 
+                <span class="actions">
+                    <a href="http://obs.dimond.top/AAA_obs_file_manager.zip" download>下载</a>
+                    <button class="btn-delete" onclick="deleteFile('AAA_obs_file_manager.zip')" title="删除">🗑️</button>
+                </span>
+            </li>
+            
+            <li>
+                <a href="http://obs.dimond.top/workflow_idm_vton.json" target="_blank">workflow_idm_vton.json</a> 
+                <span class="actions">
+                    <a href="http://obs.dimond.top/workflow_idm_vton.json" download>下载</a>
+                    <button class="btn-delete" onclick="deleteFile('workflow_idm_vton.json')" title="删除">🗑️</button>
+                </span>
+            </li>
+            
+            <li>
+                <a href="http://obs.dimond.top/workflow_8097.json" target="_blank">workflow_8097.json</a> 
+                <span class="actions">
+                    <a href="http://obs.dimond.top/workflow_8097.json" download>下载</a>
+                    <button class="btn-delete" onclick="deleteFile('workflow_8097.json')" title="删除">🗑️</button>
+                </span>
+            </li>
+            
+            <li>
+                <a href="http://obs.dimond.top/8097-workflow.json" target="_blank">8097-workflow.json</a> 
+                <span class="actions">
+                    <a href="http://obs.dimond.top/8097-workflow.json" download>下载</a>
+                    <button class="btn-delete" onclick="deleteFile('8097-workflow.json')" title="删除">🗑️</button>
+                </span>
+            </li>
+            
+            <li>
+                <a href="http://obs.dimond.top/video_tryon_workflow_8097.json" target="_blank">video_tryon_workflow_8097.json</a> 
+                <span class="actions">
+                    <a href="http://obs.dimond.top/video_tryon_workflow_8097.json" download>下载</a>
+                    <button class="btn-delete" onclick="deleteFile('video_tryon_workflow_8097.json')" title="删除">🗑️</button>
+                </span>
+            </li>
+            
+            <li>
+                <a href="http://obs.dimond.top/8094-项目经验总结.txt" target="_blank">8094-项目经验总结.txt</a> 
+                <span class="actions">
+                    <a href="http://obs.dimond.top/8094-项目经验总结.txt" download>下载</a>
+                    <button class="btn-delete" onclick="deleteFile('8094-项目经验总结.txt')" title="删除">🗑️</button>
+                </span>
+            </li>
+            
+            <li>
+                <a href="http://obs.dimond.top/ai_virtual_tryon_project_summary.txt" target="_blank">ai_virtual_tryon_project_summary.txt</a> 
+                <span class="actions">
+                    <a href="http://obs.dimond.top/ai_virtual_tryon_project_summary.txt" download>下载</a>
+                    <button class="btn-delete" onclick="deleteFile('ai_virtual_tryon_project_summary.txt')" title="删除">🗑️</button>
+                </span>
+            </li>
+            
+            <li>
+                <a href="http://obs.dimond.top/IMG_7287.png" target="_blank">IMG_7287.png</a> 
+                <span class="actions">
+                    <a href="http://obs.dimond.top/IMG_7287.png" download>下载</a>
+                    <button class="btn-delete" onclick="deleteFile('IMG_7287.png')" title="删除">🗑️</button>
+                </span>
+            </li>
+            
+            <li>
+                <a href="http://obs.dimond.top/豆包.png" target="_blank">豆包.png</a> 
+                <span class="actions">
+                    <a href="http://obs.dimond.top/豆包.png" download>下载</a>
+                    <button class="btn-delete" onclick="deleteFile('豆包.png')" title="删除">🗑️</button>
+                </span>
+            </li>
+            
+            <li>
+                <a href="http://obs.dimond.top/idm_vton_workflow.json" target="_blank">idm_vton_workflow.json</a> 
+                <span class="actions">
+                    <a href="http://obs.dimond.top/idm_vton_workflow.json" download>下载</a>
+                    <button class="btn-delete" onclick="deleteFile('idm_vton_workflow.json')" title="删除">🗑️</button>
+                </span>
+            </li>
+            
+            <li>
+                <a href="http://obs.dimond.top/workflow_wan_video_stitcher.json" target="_blank">workflow_wan_video_stitcher.json</a> 
+                <span class="actions">
+                    <a href="http://obs.dimond.top/workflow_wan_video_stitcher.json" download>下载</a>
+                    <button class="btn-delete" onclick="deleteFile('workflow_wan_video_stitcher.json')" title="删除">🗑️</button>
+                </span>
+            </li>
+            
+            <li>
+                <a href="http://obs.dimond.top/workflow_wan2_i2v.json" target="_blank">workflow_wan2_i2v.json</a> 
+                <span class="actions">
+                    <a href="http://obs.dimond.top/workflow_wan2_i2v.json" download>下载</a>
+                    <button class="btn-delete" onclick="deleteFile('workflow_wan2_i2v.json')" title="删除">🗑️</button>
+                </span>
+            </li>
+            
+            <li>
+                <a href="http://obs.dimond.top/workflow_video_tryon.json" target="_blank">workflow_video_tryon.json</a> 
+                <span class="actions">
+                    <a href="http://obs.dimond.top/workflow_video_tryon.json" download>下载</a>
+                    <button class="btn-delete" onclick="deleteFile('workflow_video_tryon.json')" title="删除">🗑️</button>
+                </span>
+            </li>
+            
+            <li>
+                <a href="http://obs.dimond.top/ComfyUI-IDM-VTON-README.md" target="_blank">ComfyUI-IDM-VTON-README.md</a> 
+                <span class="actions">
+                    <a href="http://obs.dimond.top/ComfyUI-IDM-VTON-README.md" download>下载</a>
+                    <button class="btn-delete" onclick="deleteFile('ComfyUI-IDM-VTON-README.md')" title="删除">🗑️</button>
+                </span>
+            </li>
+            
+            <li>
+                <a href="http://obs.dimond.top/ComfyUI-IDM-VTON-workflow.png" target="_blank">ComfyUI-IDM-VTON-workflow.png</a> 
+                <span class="actions">
+                    <a href="http://obs.dimond.top/ComfyUI-IDM-VTON-workflow.png" download>下载</a>
+                    <button class="btn-delete" onclick="deleteFile('ComfyUI-IDM-VTON-workflow.png')" title="删除">🗑️</button>
+                </span>
+            </li>
+            
+            <li>
+                <a href="http://obs.dimond.top/screen-guide.zip" target="_blank">screen-guide.zip</a> 
+                <span class="actions">
+                    <a href="http://obs.dimond.top/screen-guide.zip" download>下载</a>
+                    <button class="btn-delete" onclick="deleteFile('screen-guide.zip')" title="删除">🗑️</button>
+                </span>
+            </li>
+            
+            <li>
+                <a href="http://obs.dimond.top/openclaw-browser-relay.crx" target="_blank">openclaw-browser-relay.crx</a> 
+                <span class="actions">
+                    <a href="http://obs.dimond.top/openclaw-browser-relay.crx" download>下载</a>
+                    <button class="btn-delete" onclick="deleteFile('openclaw-browser-relay.crx')" title="删除">🗑️</button>
+                </span>
+            </li>
+            
+            <li>
+                <a href="http://obs.dimond.top/openclaw-chrome-extension.zip" target="_blank">openclaw-chrome-extension.zip</a> 
+                <span class="actions">
+                    <a href="http://obs.dimond.top/openclaw-chrome-extension.zip" download>下载</a>
+                    <button class="btn-delete" onclick="deleteFile('openclaw-chrome-extension.zip')" title="删除">🗑️</button>
+                </span>
+            </li>
+            
+            <li>
+                <a href="http://obs.dimond.top/COMFYUI_VIDEO_TRYON.md" target="_blank">COMFYUI_VIDEO_TRYON.md</a> 
+                <span class="actions">
+                    <a href="http://obs.dimond.top/COMFYUI_VIDEO_TRYON.md" download>下载</a>
+                    <button class="btn-delete" onclick="deleteFile('COMFYUI_VIDEO_TRYON.md')" title="删除">🗑️</button>
+                </span>
+            </li>
+            
+            <li>
+                <a href="http://obs.dimond.top/ipadapter_workflow.json" target="_blank">ipadapter_workflow.json</a> 
+                <span class="actions">
+                    <a href="http://obs.dimond.top/ipadapter_workflow.json" download>下载</a>
+                    <button class="btn-delete" onclick="deleteFile('ipadapter_workflow.json')" title="删除">🗑️</button>
+                </span>
+            </li>
+            
+            <li>
+                <a href="http://obs.dimond.top/IMG_7175.jpeg" target="_blank">IMG_7175.jpeg</a> 
+                <span class="actions">
+                    <a href="http://obs.dimond.top/IMG_7175.jpeg" download>下载</a>
+                    <button class="btn-delete" onclick="deleteFile('IMG_7175.jpeg')" title="删除">🗑️</button>
+                </span>
+            </li>
+            
+            <li>
+                <a href="http://obs.dimond.top/export_1772137512497.mov" target="_blank">export_1772137512497.mov</a> 
+                <span class="actions">
+                    <a href="http://obs.dimond.top/export_1772137512497.mov" download>下载</a>
+                    <button class="btn-delete" onclick="deleteFile('export_1772137512497.mov')" title="删除">🗑️</button>
+                </span>
+            </li>
+            
+            <li>
+                <a href="http://obs.dimond.top/20260220082745audio.wav" target="_blank">20260220082745audio.wav</a> 
+                <span class="actions">
+                    <a href="http://obs.dimond.top/20260220082745audio.wav" download>下载</a>
+                    <button class="btn-delete" onclick="deleteFile('20260220082745audio.wav')" title="删除">🗑️</button>
+                </span>
+            </li>
+            
+            <li>
+                <a href="http://obs.dimond.top/云计算安全姜植藂简历2025-11-4.pdf" target="_blank">云计算安全姜植藂简历2025-11-4.pdf</a> 
+                <span class="actions">
+                    <a href="http://obs.dimond.top/云计算安全姜植藂简历2025-11-4.pdf" download>下载</a>
+                    <button class="btn-delete" onclick="deleteFile('云计算安全姜植藂简历2025-11-4.pdf')" title="删除">🗑️</button>
+                </span>
+            </li>
+            
+            <li>
+                <a href="http://obs.dimond.top/20260125164408audio.wav" target="_blank">20260125164408audio.wav</a> 
+                <span class="actions">
+                    <a href="http://obs.dimond.top/20260125164408audio.wav" download>下载</a>
+                    <button class="btn-delete" onclick="deleteFile('20260125164408audio.wav')" title="删除">🗑️</button>
+                </span>
+            </li>
+            
+            <li>
+                <a href="http://obs.dimond.top/IMG-20260130-WA0000.jpg" target="_blank">IMG-20260130-WA0000.jpg</a> 
+                <span class="actions">
+                    <a href="http://obs.dimond.top/IMG-20260130-WA0000.jpg" download>下载</a>
+                    <button class="btn-delete" onclick="deleteFile('IMG-20260130-WA0000.jpg')" title="删除">🗑️</button>
+                </span>
+            </li>
+            
+            <li>
+                <a href="http://obs.dimond.top/20260125164648all.mp4" target="_blank">20260125164648all.mp4</a> 
+                <span class="actions">
+                    <a href="http://obs.dimond.top/20260125164648all.mp4" download>下载</a>
+                    <button class="btn-delete" onclick="deleteFile('20260125164648all.mp4')" title="删除">🗑️</button>
+                </span>
+            </li>
+            
+            <li>
+                <a href="http://obs.dimond.top/20260125101906all.mp4" target="_blank">20260125101906all.mp4</a> 
+                <span class="actions">
+                    <a href="http://obs.dimond.top/20260125101906all.mp4" download>下载</a>
+                    <button class="btn-delete" onclick="deleteFile('20260125101906all.mp4')" title="删除">🗑️</button>
+                </span>
+            </li>
+            
+            <li>
+                <a href="http://obs.dimond.top/20260125101817audio.wav" target="_blank">20260125101817audio.wav</a> 
+                <span class="actions">
+                    <a href="http://obs.dimond.top/20260125101817audio.wav" download>下载</a>
+                    <button class="btn-delete" onclick="deleteFile('20260125101817audio.wav')" title="删除">🗑️</button>
+                </span>
+            </li>
+            
+            <li>
+                <a href="http://obs.dimond.top/20260123212300all.mp4" target="_blank">20260123212300all.mp4</a> 
+                <span class="actions">
+                    <a href="http://obs.dimond.top/20260123212300all.mp4" download>下载</a>
+                    <button class="btn-delete" onclick="deleteFile('20260123212300all.mp4')" title="删除">🗑️</button>
+                </span>
+            </li>
+            
+            <li>
+                <a href="http://obs.dimond.top/character.png" target="_blank">character.png</a> 
+                <span class="actions">
+                    <a href="http://obs.dimond.top/character.png" download>下载</a>
+                    <button class="btn-delete" onclick="deleteFile('character.png')" title="删除">🗑️</button>
+                </span>
+            </li>
+            
+            <li>
+                <a href="http://obs.dimond.top/20260123212252all.mp4" target="_blank">20260123212252all.mp4</a> 
+                <span class="actions">
+                    <a href="http://obs.dimond.top/20260123212252all.mp4" download>下载</a>
+                    <button class="btn-delete" onclick="deleteFile('20260123212252all.mp4')" title="删除">🗑️</button>
+                </span>
+            </li>
+            
+            <li>
+                <a href="http://obs.dimond.top/prompt.txt" target="_blank">prompt.txt</a> 
+                <span class="actions">
+                    <a href="http://obs.dimond.top/prompt.txt" download>下载</a>
+                    <button class="btn-delete" onclick="deleteFile('prompt.txt')" title="删除">🗑️</button>
+                </span>
+            </li>
+            
+            <li>
+                <a href="http://obs.dimond.top/20260123114909all.mp4" target="_blank">20260123114909all.mp4</a> 
+                <span class="actions">
+                    <a href="http://obs.dimond.top/20260123114909all.mp4" download>下载</a>
+                    <button class="btn-delete" onclick="deleteFile('20260123114909all.mp4')" title="删除">🗑️</button>
+                </span>
+            </li>
+            
+            <li>
+                <a href="http://obs.dimond.top/20260123114903all.mp4" target="_blank">20260123114903all.mp4</a> 
+                <span class="actions">
+                    <a href="http://obs.dimond.top/20260123114903all.mp4" download>下载</a>
+                    <button class="btn-delete" onclick="deleteFile('20260123114903all.mp4')" title="删除">🗑️</button>
+                </span>
+            </li>
+            
+            <li>
+                <a href="http://obs.dimond.top/20260123085148all.mp4" target="_blank">20260123085148all.mp4</a> 
+                <span class="actions">
+                    <a href="http://obs.dimond.top/20260123085148all.mp4" download>下载</a>
+                    <button class="btn-delete" onclick="deleteFile('20260123085148all.mp4')" title="删除">🗑️</button>
+                </span>
+            </li>
+            
+            <li>
+                <a href="http://obs.dimond.top/20260123084446all.mp4" target="_blank">20260123084446all.mp4</a> 
+                <span class="actions">
+                    <a href="http://obs.dimond.top/20260123084446all.mp4" download>下载</a>
+                    <button class="btn-delete" onclick="deleteFile('20260123084446all.mp4')" title="删除">🗑️</button>
+                </span>
+            </li>
+            
+            <li>
+                <a href="http://obs.dimond.top/20260123084441all.mp4" target="_blank">20260123084441all.mp4</a> 
+                <span class="actions">
+                    <a href="http://obs.dimond.top/20260123084441all.mp4" download>下载</a>
+                    <button class="btn-delete" onclick="deleteFile('20260123084441all.mp4')" title="删除">🗑️</button>
+                </span>
+            </li>
+            
+            <li>
+                <a href="http://obs.dimond.top/20260123084020all.mp4" target="_blank">20260123084020all.mp4</a> 
+                <span class="actions">
+                    <a href="http://obs.dimond.top/20260123084020all.mp4" download>下载</a>
+                    <button class="btn-delete" onclick="deleteFile('20260123084020all.mp4')" title="删除">🗑️</button>
+                </span>
+            </li>
+            
+            <li>
+                <a href="http://obs.dimond.top/20260123084015all.mp4" target="_blank">20260123084015all.mp4</a> 
+                <span class="actions">
+                    <a href="http://obs.dimond.top/20260123084015all.mp4" download>下载</a>
+                    <button class="btn-delete" onclick="deleteFile('20260123084015all.mp4')" title="删除">🗑️</button>
+                </span>
+            </li>
+            
+            <li>
+                <a href="http://obs.dimond.top/20260123083556all.mp4" target="_blank">20260123083556all.mp4</a> 
+                <span class="actions">
+                    <a href="http://obs.dimond.top/20260123083556all.mp4" download>下载</a>
+                    <button class="btn-delete" onclick="deleteFile('20260123083556all.mp4')" title="删除">🗑️</button>
+                </span>
+            </li>
+            
+            <li>
+                <a href="http://obs.dimond.top/20260123083550all.mp4" target="_blank">20260123083550all.mp4</a> 
+                <span class="actions">
+                    <a href="http://obs.dimond.top/20260123083550all.mp4" download>下载</a>
+                    <button class="btn-delete" onclick="deleteFile('20260123083550all.mp4')" title="删除">🗑️</button>
+                </span>
+            </li>
+            
+            <li>
+                <a href="http://obs.dimond.top/20260123083125all.mp4" target="_blank">20260123083125all.mp4</a> 
+                <span class="actions">
+                    <a href="http://obs.dimond.top/20260123083125all.mp4" download>下载</a>
+                    <button class="btn-delete" onclick="deleteFile('20260123083125all.mp4')" title="删除">🗑️</button>
+                </span>
+            </li>
+            
+            <li>
+                <a href="http://obs.dimond.top/20260123081246all.mp4" target="_blank">20260123081246all.mp4</a> 
+                <span class="actions">
+                    <a href="http://obs.dimond.top/20260123081246all.mp4" download>下载</a>
+                    <button class="btn-delete" onclick="deleteFile('20260123081246all.mp4')" title="删除">🗑️</button>
+                </span>
+            </li>
+            
+            <li>
+                <a href="http://obs.dimond.top/20260123081230all.mp4" target="_blank">20260123081230all.mp4</a> 
+                <span class="actions">
+                    <a href="http://obs.dimond.top/20260123081230all.mp4" download>下载</a>
+                    <button class="btn-delete" onclick="deleteFile('20260123081230all.mp4')" title="删除">🗑️</button>
+                </span>
+            </li>
+            
+            <li>
+                <a href="http://obs.dimond.top/20260122165846all.mp4" target="_blank">20260122165846all.mp4</a> 
+                <span class="actions">
+                    <a href="http://obs.dimond.top/20260122165846all.mp4" download>下载</a>
+                    <button class="btn-delete" onclick="deleteFile('20260122165846all.mp4')" title="删除">🗑️</button>
+                </span>
+            </li>
+            
+            <li>
+                <a href="http://obs.dimond.top/20260122165156all.mp4" target="_blank">20260122165156all.mp4</a> 
+                <span class="actions">
+                    <a href="http://obs.dimond.top/20260122165156all.mp4" download>下载</a>
+                    <button class="btn-delete" onclick="deleteFile('20260122165156all.mp4')" title="删除">🗑️</button>
+                </span>
+            </li>
+            
+            <li>
+                <a href="http://obs.dimond.top/20260122163637all.mp4" target="_blank">20260122163637all.mp4</a> 
+                <span class="actions">
+                    <a href="http://obs.dimond.top/20260122163637all.mp4" download>下载</a>
+                    <button class="btn-delete" onclick="deleteFile('20260122163637all.mp4')" title="删除">🗑️</button>
+                </span>
+            </li>
+            
+            <li>
+                <a href="http://obs.dimond.top/20260122163629all.mp4" target="_blank">20260122163629all.mp4</a> 
+                <span class="actions">
+                    <a href="http://obs.dimond.top/20260122163629all.mp4" download>下载</a>
+                    <button class="btn-delete" onclick="deleteFile('20260122163629all.mp4')" title="删除">🗑️</button>
+                </span>
+            </li>
+            
+            <li>
+                <a href="http://obs.dimond.top/20260122145001all.mp4" target="_blank">20260122145001all.mp4</a> 
+                <span class="actions">
+                    <a href="http://obs.dimond.top/20260122145001all.mp4" download>下载</a>
+                    <button class="btn-delete" onclick="deleteFile('20260122145001all.mp4')" title="删除">🗑️</button>
+                </span>
+            </li>
+            
+            <li>
+                <a href="http://obs.dimond.top/20260122144954all.mp4" target="_blank">20260122144954all.mp4</a> 
+                <span class="actions">
+                    <a href="http://obs.dimond.top/20260122144954all.mp4" download>下载</a>
+                    <button class="btn-delete" onclick="deleteFile('20260122144954all.mp4')" title="删除">🗑️</button>
+                </span>
+            </li>
+            
+            <li>
+                <a href="http://obs.dimond.top/character.mp4" target="_blank">character.mp4</a> 
+                <span class="actions">
+                    <a href="http://obs.dimond.top/character.mp4" download>下载</a>
+                    <button class="btn-delete" onclick="deleteFile('character.mp4')" title="删除">🗑️</button>
+                </span>
+            </li>
+            
+            <li>
+                <a href="http://obs.dimond.top/20260121050014all.mp4" target="_blank">20260121050014all.mp4</a> 
+                <span class="actions">
+                    <a href="http://obs.dimond.top/20260121050014all.mp4" download>下载</a>
+                    <button class="btn-delete" onclick="deleteFile('20260121050014all.mp4')" title="删除">🗑️</button>
+                </span>
+            </li>
+            
+            <li>
+                <a href="http://obs.dimond.top/20260118220507all.mp4" target="_blank">20260118220507all.mp4</a> 
+                <span class="actions">
+                    <a href="http://obs.dimond.top/20260118220507all.mp4" download>下载</a>
+                    <button class="btn-delete" onclick="deleteFile('20260118220507all.mp4')" title="删除">🗑️</button>
+                </span>
+            </li>
+            
+            <li>
+                <a href="http://obs.dimond.top/20260118220345all.mp4" target="_blank">20260118220345all.mp4</a> 
+                <span class="actions">
+                    <a href="http://obs.dimond.top/20260118220345all.mp4" download>下载</a>
+                    <button class="btn-delete" onclick="deleteFile('20260118220345all.mp4')" title="删除">🗑️</button>
+                </span>
+            </li>
+            
+            <li>
+                <a href="http://obs.dimond.top/20260117213444all.mp4" target="_blank">20260117213444all.mp4</a> 
+                <span class="actions">
+                    <a href="http://obs.dimond.top/20260117213444all.mp4" download>下载</a>
+                    <button class="btn-delete" onclick="deleteFile('20260117213444all.mp4')" title="删除">🗑️</button>
+                </span>
+            </li>
+            
+            <li>
+                <a href="http://obs.dimond.top/20260117213002all.mp4" target="_blank">20260117213002all.mp4</a> 
+                <span class="actions">
+                    <a href="http://obs.dimond.top/20260117213002all.mp4" download>下载</a>
+                    <button class="btn-delete" onclick="deleteFile('20260117213002all.mp4')" title="删除">🗑️</button>
+                </span>
+            </li>
+            
+            <li>
+                <a href="http://obs.dimond.top/20260117214002all.mp4" target="_blank">20260117214002all.mp4</a> 
+                <span class="actions">
+                    <a href="http://obs.dimond.top/20260117214002all.mp4" download>下载</a>
+                    <button class="btn-delete" onclick="deleteFile('20260117214002all.mp4')" title="删除">🗑️</button>
+                </span>
+            </li>
+            
+            <li>
+                <a href="http://obs.dimond.top/20260117214452all.mp4" target="_blank">20260117214452all.mp4</a> 
+                <span class="actions">
+                    <a href="http://obs.dimond.top/20260117214452all.mp4" download>下载</a>
+                    <button class="btn-delete" onclick="deleteFile('20260117214452all.mp4')" title="删除">🗑️</button>
+                </span>
+            </li>
+            
+            <li>
+                <a href="http://obs.dimond.top/20260118081555audio.wav" target="_blank">20260118081555audio.wav</a> 
+                <span class="actions">
+                    <a href="http://obs.dimond.top/20260118081555audio.wav" download>下载</a>
+                    <button class="btn-delete" onclick="deleteFile('20260118081555audio.wav')" title="删除">🗑️</button>
+                </span>
+            </li>
+            
+            <li>
+                <a href="http://obs.dimond.top/20260118055333公告板.txt" target="_blank">20260118055333公告板.txt</a> 
+                <span class="actions">
+                    <a href="http://obs.dimond.top/20260118055333公告板.txt" download>下载</a>
+                    <button class="btn-delete" onclick="deleteFile('20260118055333公告板.txt')" title="删除">🗑️</button>
+                </span>
+            </li>
+            
+            <li>
+                <a href="http://obs.dimond.top/20260118053349all.mp4" target="_blank">20260118053349all.mp4</a> 
+                <span class="actions">
+                    <a href="http://obs.dimond.top/20260118053349all.mp4" download>下载</a>
+                    <button class="btn-delete" onclick="deleteFile('20260118053349all.mp4')" title="删除">🗑️</button>
+                </span>
+            </li>
+            
+            <li>
+                <a href="http://obs.dimond.top/20260118053223audio.wav" target="_blank">20260118053223audio.wav</a> 
+                <span class="actions">
+                    <a href="http://obs.dimond.top/20260118053223audio.wav" download>下载</a>
+                    <button class="btn-delete" onclick="deleteFile('20260118053223audio.wav')" title="删除">🗑️</button>
+                </span>
+            </li>
+            
+            <li>
+                <a href="http://obs.dimond.top/20260118041031公告板.txt" target="_blank">20260118041031公告板.txt</a> 
+                <span class="actions">
+                    <a href="http://obs.dimond.top/20260118041031公告板.txt" download>下载</a>
+                    <button class="btn-delete" onclick="deleteFile('20260118041031公告板.txt')" title="删除">🗑️</button>
+                </span>
+            </li>
+            
+            <li>
+                <a href="http://obs.dimond.top/20260118040239all.mp4" target="_blank">20260118040239all.mp4</a> 
+                <span class="actions">
+                    <a href="http://obs.dimond.top/20260118040239all.mp4" download>下载</a>
+                    <button class="btn-delete" onclick="deleteFile('20260118040239all.mp4')" title="删除">🗑️</button>
+                </span>
+            </li>
+            
+            <li>
+                <a href="http://obs.dimond.top/20260117044246audio.wav" target="_blank">20260117044246audio.wav</a> 
+                <span class="actions">
+                    <a href="http://obs.dimond.top/20260117044246audio.wav" download>下载</a>
+                    <button class="btn-delete" onclick="deleteFile('20260117044246audio.wav')" title="删除">🗑️</button>
+                </span>
+            </li>
+            
+            <li>
+                <a href="http://obs.dimond.top/20260115150534all.mp4" target="_blank">20260115150534all.mp4</a> 
+                <span class="actions">
+                    <a href="http://obs.dimond.top/20260115150534all.mp4" download>下载</a>
+                    <button class="btn-delete" onclick="deleteFile('20260115150534all.mp4')" title="删除">🗑️</button>
+                </span>
+            </li>
+            
+            <li>
+                <a href="http://obs.dimond.top/20260115131201audio.wav" target="_blank">20260115131201audio.wav</a> 
+                <span class="actions">
+                    <a href="http://obs.dimond.top/20260115131201audio.wav" download>下载</a>
+                    <button class="btn-delete" onclick="deleteFile('20260115131201audio.wav')" title="删除">🗑️</button>
+                </span>
+            </li>
+            
+            <li>
+                <a href="http://obs.dimond.top/20260115203357all.mp4" target="_blank">20260115203357all.mp4</a> 
+                <span class="actions">
+                    <a href="http://obs.dimond.top/20260115203357all.mp4" download>下载</a>
+                    <button class="btn-delete" onclick="deleteFile('20260115203357all.mp4')" title="删除">🗑️</button>
+                </span>
+            </li>
+            
+            <li>
+                <a href="http://obs.dimond.top/ScreenRecording_01-15-2026 19-28-32_1.mov" target="_blank">ScreenRecording_01-15-2026 19-28-32_1.mov</a> 
+                <span class="actions">
+                    <a href="http://obs.dimond.top/ScreenRecording_01-15-2026 19-28-32_1.mov" download>下载</a>
+                    <button class="btn-delete" onclick="deleteFile('ScreenRecording_01-15-2026 19-28-32_1.mov')" title="删除">🗑️</button>
+                </span>
+            </li>
+            
+            <li>
+                <a href="http://obs.dimond.top/扩展视频到音频长度okokok.json" target="_blank">扩展视频到音频长度okokok.json</a> 
+                <span class="actions">
+                    <a href="http://obs.dimond.top/扩展视频到音频长度okokok.json" download>下载</a>
+                    <button class="btn-delete" onclick="deleteFile('扩展视频到音频长度okokok.json')" title="删除">🗑️</button>
+                </span>
+            </li>
+            
+            <li>
+                <a href="http://obs.dimond.top/v14044g50000d55n63vog65jf1b3c4cg.mp4" target="_blank">v14044g50000d55n63vog65jf1b3c4cg.mp4</a> 
+                <span class="actions">
+                    <a href="http://obs.dimond.top/v14044g50000d55n63vog65jf1b3c4cg.mp4" download>下载</a>
+                    <button class="btn-delete" onclick="deleteFile('v14044g50000d55n63vog65jf1b3c4cg.mp4')" title="删除">🗑️</button>
+                </span>
+            </li>
+            
+            <li>
+                <a href="http://obs.dimond.top/20260114091825audio.flac" target="_blank">20260114091825audio.flac</a> 
+                <span class="actions">
+                    <a href="http://obs.dimond.top/20260114091825audio.flac" download>下载</a>
+                    <button class="btn-delete" onclick="deleteFile('20260114091825audio.flac')" title="删除">🗑️</button>
+                </span>
+            </li>
+            
+            <li>
+                <a href="http://obs.dimond.top/tone.wav" target="_blank">tone.wav</a> 
+                <span class="actions">
+                    <a href="http://obs.dimond.top/tone.wav" download>下载</a>
+                    <button class="btn-delete" onclick="deleteFile('tone.wav')" title="删除">🗑️</button>
+                </span>
+            </li>
+            
+            <li>
+                <a href="http://obs.dimond.top/reference.mp4" target="_blank">reference.mp4</a> 
+                <span class="actions">
+                    <a href="http://obs.dimond.top/reference.mp4" download>下载</a>
+                    <button class="btn-delete" onclick="deleteFile('reference.mp4')" title="删除">🗑️</button>
+                </span>
+            </li>
+            
+            <li>
+                <a href="http://obs.dimond.top/视频换背景video_wan_vace_14B_v2v.json" target="_blank">视频换背景video_wan_vace_14B_v2v.json</a> 
+                <span class="actions">
+                    <a href="http://obs.dimond.top/视频换背景video_wan_vace_14B_v2v.json" download>下载</a>
+                    <button class="btn-delete" onclick="deleteFile('视频换背景video_wan_vace_14B_v2v.json')" title="删除">🗑️</button>
+                </span>
+            </li>
+            
+            <li>
+                <a href="http://obs.dimond.top/TRIM-0.8.36-645.iso" target="_blank">TRIM-0.8.36-645.iso</a> 
+                <span class="actions">
+                    <a href="http://obs.dimond.top/TRIM-0.8.36-645.iso" download>下载</a>
+                    <button class="btn-delete" onclick="deleteFile('TRIM-0.8.36-645.iso')" title="删除">🗑️</button>
+                </span>
+            </li>
+            
+            <li>
+                <a href="http://obs.dimond.top/rufus-4.6p.exe" target="_blank">rufus-4.6p.exe</a> 
+                <span class="actions">
+                    <a href="http://obs.dimond.top/rufus-4.6p.exe" download>下载</a>
+                    <button class="btn-delete" onclick="deleteFile('rufus-4.6p.exe')" title="删除">🗑️</button>
+                </span>
+            </li>
+            
+            <li>
+                <a href="http://obs.dimond.top/win10enterprise.iso" target="_blank">win10enterprise.iso</a> 
+                <span class="actions">
+                    <a href="http://obs.dimond.top/win10enterprise.iso" download>下载</a>
+                    <button class="btn-delete" onclick="deleteFile('win10enterprise.iso')" title="删除">🗑️</button>
+                </span>
+            </li>
+            
+            <li>
+                <a href="http://obs.dimond.top/欢乐颂 Ode to Joy EP18.1080P.WEB-DL.mp4" target="_blank">欢乐颂 Ode to Joy EP18.1080P.WEB-DL.mp4</a> 
+                <span class="actions">
+                    <a href="http://obs.dimond.top/欢乐颂 Ode to Joy EP18.1080P.WEB-DL.mp4" download>下载</a>
+                    <button class="btn-delete" onclick="deleteFile('欢乐颂 Ode to Joy EP18.1080P.WEB-DL.mp4')" title="删除">🗑️</button>
+                </span>
+            </li>
+            
+            <li>
+                <a href="http://obs.dimond.top/Windows.iso" target="_blank">Windows.iso</a> 
+                <span class="actions">
+                    <a href="http://obs.dimond.top/Windows.iso" download>下载</a>
+                    <button class="btn-delete" onclick="deleteFile('Windows.iso')" title="删除">🗑️</button>
+                </span>
+            </li>
+            
+        </ul>
+    </body>
+    </html>
+    

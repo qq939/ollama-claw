@@ -51,7 +51,8 @@ AGENT_PATHS = {
     "hermes@latest": {"project_path": "/home/agent/.hermes/workspace/project", "sessions_path": "/home/agent/.hermes/projects", "rules_path": "/home/agent/.hermes/workspace/config-rules", "config_file": "openclaw.json"},
 }
 CLAUDE_OLLAMA_PROVIDER_ID = "ollama-local"
-CLAUDE_DEFAULT_BASE_URL = os.environ.get("CLAUDE_ANTHROPIC_BASE_URL", "http://ollama:11434")
+OLLAMA_DEFAULT_BASE_URL = os.environ.get("OLLAMA_BASE_URL", "http://host.docker.internal:11434").rstrip("/")
+CLAUDE_DEFAULT_BASE_URL = os.environ.get("CLAUDE_ANTHROPIC_BASE_URL", OLLAMA_DEFAULT_BASE_URL)
 CLAUDE_DEFAULT_AUTH_TOKEN = os.environ.get("CLAUDE_ANTHROPIC_AUTH_TOKEN", "ollama")
 
 def get_agent_paths(agent_type):
@@ -127,8 +128,10 @@ def create_app(docker_client=None):
         if configured:
             candidates.extend([item.strip() for item in configured.split(",") if item.strip()])
         candidates.extend([
-            "http://ollama:11434",
             "http://host.docker.internal:11434",
+            "http://ollama:11434",
+            "http://localhost:11434",
+            "http://127.0.0.1:11434",
         ])
         if ollama_api_state.get("base_url"):
             candidates.insert(0, ollama_api_state["base_url"])
@@ -381,7 +384,7 @@ def create_app(docker_client=None):
             "ANTHROPIC_BASE_URL": CLAUDE_DEFAULT_BASE_URL,
             "ANTHROPIC_AUTH_TOKEN": CLAUDE_DEFAULT_AUTH_TOKEN,
             "ANTHROPIC_API_KEY": CLAUDE_DEFAULT_AUTH_TOKEN,
-            "OLLAMA_BASE_URL": os.environ.get("OLLAMA_BASE_URL", "http://ollama:11434"),
+            "OLLAMA_BASE_URL": OLLAMA_DEFAULT_BASE_URL,
         }
         settings_env = settings.get("env") if isinstance(settings, dict) else {}
         if isinstance(settings_env, dict):
@@ -430,7 +433,7 @@ def create_app(docker_client=None):
 
         data.setdefault("models", {}).setdefault("providers", {})
         provider = data["models"]["providers"].setdefault("ollama", {})
-        provider["baseUrl"] = "http://ollama:11434/v1"
+        provider["baseUrl"] = f"{OLLAMA_DEFAULT_BASE_URL}/v1"
         provider["apiKey"] = provider.get("apiKey") or "ollama-local"
         provider["api"] = "openai-completions"
 
@@ -493,7 +496,7 @@ def create_app(docker_client=None):
             "ANTHROPIC_DEFAULT_HAIKU_MODEL": ollama_model,
             "ANTHROPIC_DEFAULT_OPUS_MODEL": ollama_model,
             "ANTHROPIC_DEFAULT_SONNET_MODEL": ollama_model,
-            "OLLAMA_BASE_URL": os.environ.get("OLLAMA_BASE_URL", "http://ollama:11434"),
+            "OLLAMA_BASE_URL": OLLAMA_DEFAULT_BASE_URL,
             "OLLAMA_MODEL": ollama_model,
             "API_TIMEOUT_MS": "3000000",
             "ANTHROPIC_DISABLE_PREFLIGHT": "1",
@@ -663,7 +666,7 @@ const data = readJson(configPath);
 data.models = data.models || {};
 data.models.providers = data.models.providers || {};
 const provider = data.models.providers.ollama || {};
-provider.baseUrl = "http://ollama:11434/v1";
+provider.baseUrl = `${process.env.OLLAMA_BASE_URL || "http://host.docker.internal:11434"}/v1`;
 provider.apiKey = provider.apiKey || "ollama-local";
 provider.api = "openai-completions";
 const models = Array.isArray(provider.models) ? provider.models : [];
@@ -693,6 +696,7 @@ console.log(JSON.stringify({ config_path: configPath, model: primaryModel, ollam
             "CONFIG_HOME": config_home_for_agent_type(agent_type),
             "PRIMARY_MODEL": primary_model,
             "OLLAMA_MODEL": ollama_model,
+            "OLLAMA_BASE_URL": OLLAMA_DEFAULT_BASE_URL,
             "PROJECT_PATH": project_path_for_agent_type(agent_type),
         })
 
@@ -706,7 +710,7 @@ const path = require("path");
 const home = process.env.CONFIG_HOME;
 const projectPath = process.env.PROJECT_PATH;
 const model = process.env.OLLAMA_MODEL;
-const baseUrl = process.env.CLAUDE_BASE_URL || "http://ollama:11434";
+const baseUrl = process.env.CLAUDE_BASE_URL || "http://host.docker.internal:11434";
 const token = process.env.CLAUDE_AUTH_TOKEN || "ollama";
 const providerId = "ollama-local";
 const readJson = (p) => {
@@ -724,7 +728,7 @@ const env = {
   ANTHROPIC_DEFAULT_HAIKU_MODEL: model,
   ANTHROPIC_DEFAULT_OPUS_MODEL: model,
   ANTHROPIC_DEFAULT_SONNET_MODEL: model,
-  OLLAMA_BASE_URL: process.env.OLLAMA_BASE_URL || "http://ollama:11434",
+  OLLAMA_BASE_URL: process.env.OLLAMA_BASE_URL || "http://host.docker.internal:11434",
   OLLAMA_MODEL: model,
   API_TIMEOUT_MS: "3000000",
   ANTHROPIC_DISABLE_PREFLIGHT: "1",
@@ -773,7 +777,7 @@ console.log(JSON.stringify({ settings_path: settingsPath, config_path: configPat
             "OLLAMA_MODEL": ollama_model,
             "CLAUDE_BASE_URL": os.environ.get("CLAUDE_ANTHROPIC_BASE_URL", CLAUDE_DEFAULT_BASE_URL),
             "CLAUDE_AUTH_TOKEN": os.environ.get("CLAUDE_ANTHROPIC_AUTH_TOKEN", CLAUDE_DEFAULT_AUTH_TOKEN),
-            "OLLAMA_BASE_URL": os.environ.get("OLLAMA_BASE_URL", "http://ollama:11434"),
+            "OLLAMA_BASE_URL": OLLAMA_DEFAULT_BASE_URL,
         })
 
     def apply_model_to_container(container, agent_type, model_name, restart=True):

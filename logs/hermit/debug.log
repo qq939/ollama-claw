@@ -94,3 +94,11 @@ exit_code: 128
 output:
 fatal: not a git repository (or any parent up to mount point /home/agent/.openclaw/workspace)
 Stopping at filesystem boundary (GIT_DISCOVERY_ACROSS_FILESYSTEM not set).
+
+=== GIT COMMITS DEBUG ===
+container: 20002-runninghub
+cmd: cd /home/agent/.claude/workspace/project && git -c safe.directory=* rev-parse --short HEAD && git -c safe.directory=* log --format="%h %ad %s" --date=short -20
+exit_code: 128
+output:
+fatal: not a git repository (or any parent up to mount point /home/agent/.claude/workspace)
+Stopping at filesystem boundary (GIT_DISCOVERY_ACROSS_FILESYSTEM not set).

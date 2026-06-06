@@ -8,20 +8,6 @@ networks:
         - subnet: 172.31.0.0/16
 
 services:
-  ollama:
-    image: ollama/ollama:latest
-    container_name: ollama
-    restart: unless-stopped
-    volumes:
-      - ./ollama-data:/root/.ollama
-    ports:
-      - "11434:11434"
-    networks:
-      - ollama-claw-network
-    environment:
-      - OLLAMA_HOST=0.0.0.0:11434
-      - OLLAMA_MODELS=/root/.ollama/models
-
   openclaw-gateway:
     build:
       context: ./agents/gateway
@@ -39,9 +25,6 @@ services:
     environment:
       - OPENCLAW_GATEWAY_TOKEN=${OPENCLAW_GATEWAY_TOKEN:-2ac145e2572b9b2fb44717b520c22588858403a75d4a6ea2}
       - OPENCLAW_GATEWAY_PORT=18790
-    depends_on:
-      - ollama
-
   control-18080:
     build:
       context: ./control
@@ -58,9 +41,9 @@ services:
       - OPENCLAW_GATEWAY_HOST=172.31.0.10
       - OPENCLAW_GATEWAY_PORT=18790
       - OPENCLAW_GATEWAY_TOKEN=${OPENCLAW_GATEWAY_TOKEN:-2ac145e2572b9b2fb44717b520c22588858403a75d4a6ea2}
-      - OLLAMA_BASE_URL=http://ollama:11434
+      - OLLAMA_BASE_URL=${OLLAMA_BASE_URL:-http://host.docker.internal:11434}
       - CONTROL_BASE_PORT=${CONTROL_BASE_PORT:-18080}
-      - CLAUDE_ANTHROPIC_BASE_URL=${CLAUDE_ANTHROPIC_BASE_URL:-http://ollama:11434}
+      - CLAUDE_ANTHROPIC_BASE_URL=${CLAUDE_ANTHROPIC_BASE_URL:-http://host.docker.internal:11434}
       - CLAUDE_ANTHROPIC_AUTH_TOKEN=${CLAUDE_ANTHROPIC_AUTH_TOKEN:-ollama}
     extra_hosts:
       - "host.docker.internal:host-gateway"
@@ -105,6 +88,3 @@ services:
     command: ["sleep", "infinity"]
     networks:
       - ollama-claw-network
-
-volumes:
-  ollama-data:

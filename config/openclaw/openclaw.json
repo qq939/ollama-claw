@@ -15,7 +15,7 @@
   "models": {
     "providers": {
       "ollama": {
-        "baseUrl": "http://ollama:11434/v1",
+        "baseUrl": "http://host.docker.internal:11434/v1",
         "apiKey": "ollama-local",
         "api": "openai-completions",
         "models": [
@@ -122,7 +122,7 @@
   "agents": {
     "defaults": {
       "model": {
-        "primary": "ollama/deepseek-r1:1.5b"
+        "primary": "ollama/qwen3.5:9b"
       },
       "workspace": "/home/agent/.openclaw/workspace/project",
       "compaction": {

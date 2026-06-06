@@ -1,0 +1,94 @@
+# OpenClaw Gateway 连接与审批 — 官方文档解读
+
+> 来源：`docs.openclaw.ai`（Gateway-owned pairing、Devices CLI、Troubleshooting、Configuration 四页的原文摘录与现场对照）
+
+---
+
+## 一、Gateway 拥有所有连接状态（[`/gateway/pairing`](https://docs.openclaw.ai/gateway/pairing) 与 [`/cli/devices`](https://docs.openclaw.ai/cli/devices)）
+
+> **In Gateway-owned pairing, the Gateway is the source of truth for which nodes are allowed to join. UIs (macOS app, future clients) are just frontends that approve or reject pending requests.**
+
+- 客户端发起 connect → Gateway 写一条 pending request → **owner approve** → Gateway 签发 **新 token** → 客户端用新 token 重连 = paired
+- 旧 token 不会复用于重新配对，**Approval always generates a fresh token**
+- Pending 5 分钟自动过期
+
+## 二、Connect 时的认证优先级（[`/gateway/troubleshooting`](https://docs.openclaw.ai/gateway/troubleshooting)）
+
+> Normal reconnect auth precedence is **explicit shared token/password first**, then explicit `deviceToken`, then stored device token, then bootstrap token.
+
+- 你看到的 `AUTH_TOKEN_MISMATCH` 走的是 shared token 比对
+- 如果 `canRetryWithDeviceToken=true` 可以做一次带设备 token 的可信重试
+- 但前提是**设备已经被 approve 拿到了 deviceToken**
+
+## 三、官方对 `AUTH_TOKEN_MISMATCH` 的修复流程（**Token drift recovery checklist**）
+
+```bash
+# 1. 确认 gateway 的 token 源头
+openclaw config get gateway.auth.token
+
+# 2. 列出 paired devices
+openclaw devices list
+
+# 3. 轮转 operator token
+openclaw devices rotate --device <deviceId> --role operator
+
+# 4. 如果轮转还不够就 remove + 重新 approve
+openclaw devices remove <deviceId>
+openclaw devices list
+openclaw devices approve <requestId>
+
+# 5. 用最新 token 重试
+```
+
+## 四、官方对 `PAIRING_REQUIRED` 的子错误码（**`error.details.reason`**）
+
+| reason | 含义 | 处理 |
+|---|---|---|
+| `not-paired` | 设备还没配对 | `openclaw devices approve <requestId>` |
+| `scope-upgrade` | 设备已配对但请求更高 scope | review 后 `approve` |
+| `role-upgrade` | 请求更高 role | review 后 `approve` |
+| `metadata-upgrade` | 设备已配对且只是 metadata 变 | **可以自动审批** |
+
+## 五、官方对 auto-approve 的态度
+
+- `silent: true` 这个 flag 是 auto-approval 的 hint，**但只在 `isLocalDirectRequest=true` 时生效**——也就是 loopback 连接
+- 远程容器里的 `openclaw agent` 走 `172.31.0.7:randport → 172.31.0.10:18790`，**不是 loopback**，silent 自动审批根本不会触发
+- `gateway.nodes.pairing.autoApproveCidrs` 是给**节点**（iOS/Android/macOS 节点）的，不是给操作员客户端的
+- **官方对 operator client 配对没有任何 auto-approve 开关**——必须显式走 `openclaw devices approve`
+
+## 六、`metadata-upgrade` 这条缝
+
+> Silent auto-approval is narrow: it applies only to trusted non-browser **local reconnects** that already proved possession of local or shared credentials.
+> **Browser/Control UI clients and remote clients still use the explicit re-approval flow.** Scope upgrades (read to write/admin) and public key changes are **not** eligible for metadata-upgrade auto-approval.
+
+明确把 **remote clients** 排除在外了。
+
+---
+
+## 我之前做的错在哪，对照官方说法
+
+| 我之前做的 | 官方说法 | 评 |
+|---|---|---|
+| 改 `clientId` 白名单（`["gateway-client","cli"]` 等） | "clientId 不是 trust anchor，token 才是" | 走错方向 |
+| 改 `paired.json` 文件 | 写完文件不等于内存 cache 更新；批准永远发**新 token**，旧 token 失效 | 没法工作 |
+| 用 `started_at_ms` 时间窗过滤 | 官方推荐按 `error.details.reason` 判断 (`not-paired` / `scope-upgrade` / `role-upgrade` / `metadata-upgrade`) | 不是这思路 |
+| supervisor 持续调 `device.pair.approve` RPC | **方向是对的**——这就是官方要求的"显式 approve" 路径 | ✅ |
+
+我现在的 supervisor 一直在调 `device.pair.approve`，gateway 日志也确认 `device pairing approved device=...` **真的在落**。
+
+---
+
+## 还卡在哪
+
+TUI 那一侧 pairing 批了，agent CLI 的 connect 也走了 `device.pair.approve` 批过，但 **下一次重连时仍然 `token_mismatch`**。我比对过 `auth.token`（gateway 配置里的）和 connect 帧里的 `auth.token`，**字节级完全一致**（48 字符 hex 一致）。
+
+按官方文档我目前能想到的还剩**两条路**没走完：
+
+1. **调 `openclaw devices rotate --device <id> --role operator`**——强制重发 operator token，看是不是 token drift
+2. **升级到 `2026.5.28`**（gateway 启动 log 里写的最新版）—— 2026.2.9 的 token mismatch 可能就是 v1 device auth 协议里某个被修复的 bug
+
+要不要我按官方 **Token drift recovery checklist** 走一遍试试，rotate 一下 operator token 看错误码变不变？还是直接拉 `2026.5.28` 的 openclaw 镜像换掉 2026.2.9？
+
+---
+
+*整理时间：2026-06-03 ｜ 源文档：docs.openclaw.ai（gateway/pairing、cli/devices、gateway/troubleshooting、gateway/configuration）*

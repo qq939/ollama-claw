@@ -16,15 +16,15 @@
         "name": "Ollama",
         "settingsConfig": {
           "env": {
-            "ANTHROPIC_BASE_URL": "http://ollama:11434",
+            "ANTHROPIC_BASE_URL": "http://host.docker.internal:11434",
             "ANTHROPIC_AUTH_TOKEN": "ollama",
             "ANTHROPIC_API_KEY": "ollama",
-            "ANTHROPIC_MODEL": "qwen2.5:0.5b",
-            "ANTHROPIC_DEFAULT_HAIKU_MODEL": "qwen2.5:0.5b",
-            "ANTHROPIC_DEFAULT_OPUS_MODEL": "qwen2.5:0.5b",
-            "ANTHROPIC_DEFAULT_SONNET_MODEL": "qwen2.5:0.5b",
-            "OLLAMA_BASE_URL": "http://ollama:11434",
-            "OLLAMA_MODEL": "qwen2.5:0.5b",
+            "ANTHROPIC_MODEL": "qwen3.5:35b-a3b",
+            "ANTHROPIC_DEFAULT_HAIKU_MODEL": "qwen3.5:35b-a3b",
+            "ANTHROPIC_DEFAULT_OPUS_MODEL": "qwen3.5:35b-a3b",
+            "ANTHROPIC_DEFAULT_SONNET_MODEL": "qwen3.5:35b-a3b",
+            "OLLAMA_BASE_URL": "http://host.docker.internal:11434",
+            "OLLAMA_MODEL": "qwen3.5:35b-a3b",
             "API_TIMEOUT_MS": "3000000",
             "ANTHROPIC_DISABLE_PREFLIGHT": "1",
             "CLAUDE_CODE_TRUST_ALL": "true",
@@ -34,12 +34,12 @@
         },
         "websiteUrl": "https://ollama.com/library",
         "category": "local",
-        "createdAt": 1780454562097,
+        "createdAt": 1780747883311,
         "meta": {
           "custom_endpoints": {
-            "http://ollama:11434": {
-              "url": "http://ollama:11434",
-              "addedAt": 1780454562097
+            "http://host.docker.internal:11434": {
+              "url": "http://host.docker.internal:11434",
+              "addedAt": 1780747883311
             }
           }
         }

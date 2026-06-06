@@ -1,0 +1,20 @@
+﻿python : Traceback (most recent call last):
+At line:1 char:1
++ python C:\Users\qq939\Downloads\ollama-claw\inspect.py 2>&1 | Out-Fil ...
++ ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+    + CategoryInfo          : NotSpecified: (Traceback (most recent call last)::String) [], RemoteException
+    + FullyQualifiedErrorId : NativeCommandError
+ 
+  File "C:\Users\qq939\Downloads\ollama-claw\inspect.py", line 1, in <module>
+    import pdfplumber
+  File "F:\ComfyUI2\py311\Lib\site-packages\pdfplumber\__init__.py", line 13, in <module>
+    from . import utils
+  File "F:\ComfyUI2\py311\Lib\site-packages\pdfplumber\utils\__init__.py", line 32, in <module>
+    from .text import (  # noqa: F401
+  File "F:\ComfyUI2\py311\Lib\site-packages\pdfplumber\utils\text.py", line 1, in <module>
+    import inspect
+  File "C:\Users\qq939\Downloads\ollama-claw\inspect.py", line 2, in <module>
+    with pdfplumber.open(r"C:\Users\qq939\Downloads\ollama-claw\openclaw-gateway-pairing-notes.pdf") as pdf:
+         ^^^^^^^^^^^^^^^
+AttributeError: partially initialized module 'pdfplumber' has no attribute 'open' (most likely due to a circular import
+)
